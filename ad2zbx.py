@@ -2,6 +2,7 @@
 
 import os
 import ldap3
+from pyzabbix import ZabbixAPI
 from configparser import RawConfigParser
 from ldap3.core.exceptions import LDAPSocketOpenError
 
@@ -107,7 +108,8 @@ if __name__ == '__main__':
     AD_USER = config.get('ldap', 'bind_user')
     AD_PASS = config.get('ldap', 'bind_pass')
     AD_SSL = config.getboolean('ldap', 'use_ssl', fallback=False)
-    AD_GROUPS = [group for group in config.get('ldap', 'group_names').replace(" ", "").split(",")]
+    # AD_GROUPS = [group for group in config.get('ldap', 'group_names').replace(" ", "").split(",")]
+    AD_GROUPS = eval(config.get('ldap', 'group_names'))
     AD_ATTRS = [attr for attr in config.get('ldap', 'ldap_attrs').replace(" ", "").split(",")]
     AD_USER_FILTER = config.get('ldap', 'ldap_user_filter')
 
@@ -121,12 +123,42 @@ if __name__ == '__main__':
     ldap_conn = ldap_connect(AD_SRV, AD_USER, AD_PASS)
 
     ad_users_by_group = {}
-    for group in AD_GROUPS:
+    for group in AD_GROUPS.keys():
         group_dn = get_dn(ldap_conn, 'Group', group)
         if len(group_dn) > 1:
             raise SystemExit(f'ERROR: Found more than one groups for name {group}')
         # Find users of group
         search_filter = f'(&{AD_USER_FILTER}(memberOf={group_dn[0]}))'
-        users = get_users(ldap_conn, search_filter, AD_ATTRS)
-        ad_users_by_group[group] = [user.entry_attributes_as_dict for user in users]
+        ad_users = get_users(ldap_conn, search_filter, AD_ATTRS)
+        ad_users_by_group[group] = [user.entry_attributes_as_dict for user in ad_users]
 
+    # Connect to Zabbix API
+    zapi = ZabbixAPI(ZBX_API_URL)
+    zapi.login(ZBX_USER, ZBX_PASS)
+
+    # Get target group ID
+    zbx_group = zapi.do_request(method="usergroup.get", params={"filter": {"name": ZBX_GROUP}})
+    if len(zbx_group['result']) != 1:
+        raise SystemExit(f'ERROR: Found more that 1 group with name {ZBX_GROUP} in Zabbix. That\'s weird')
+    zbx_group_id = zbx_group['result'][0]['usrgrpid']
+
+    # Get users list of target group
+    zbx_users = zapi.do_request(method="user.get", params={"usrgrpids": [zbx_group_id]})
+
+    # Create users for each group
+    for group, users in ad_users_by_group.items():
+        if "USER" not in group:
+            for user in users:
+                alias = user['sAMAccountName'][0]
+                usertype = AD_GROUPS[group]
+                name = user['givenName'][0]
+                surname = user['sn'][0]
+                mail = user['mail'][0]
+                create_params = {"alias": alias, "usrgrps": [{"usrgrpid": zbx_group_id}], "type": usertype,
+                                 "name": name, "surname": surname,
+                                 "user_medias": [{"mediatypeid": "1", "sendto": [mail], "severity": "60"}]}
+                # create_params = {
+                #     "alias": "asand3r", "usrgrps": [{"usrgrpid": zbx_group_id}], "type": "3",
+                #     "name": "Alexander", "surname": "Khatsayuk",
+                #     "user_medias": [{"mediatypeid": "1", "sendto": ["asand3r@gexample.com"], "severity": "60"}]}
+                zapi.do_request(method="user.create", params=create_params)
