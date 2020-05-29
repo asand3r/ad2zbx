@@ -94,6 +94,44 @@ def get_dn(conn, object_class, property_value, property_name='sAMAccountName'):
     return dn_list
 
 
+def check_aduser(user):
+    """
+    Check AD user properties
+    :param user:
+    Dict with user properties
+    :return:
+    List of True or False and list of empty attributes
+    """
+
+    empty_attrs = []
+    for attr in AD_ATTRS:
+        if len(user[attr]) == 0:
+            empty_attrs.append(attr)
+
+    if len(empty_attrs) == 0:
+        return True, empty_attrs
+    else:
+        return False, empty_attrs
+
+
+def prepare_aduser(user):
+    """
+
+    :param user:
+    :return:
+    """
+
+    # "alias": "asand3r", "usrgrps": [{"usrgrpid": zbx_group_id}], "type": "3",
+    # "name": "Alexander", "surname": "Khatsayuk",
+    # "user_medias": [{"mediatypeid": "1", "sendto": ["asand3r@gexample.com"], "severity": "60"}]}
+
+    nuser = {}
+    for attr, value in user.items():
+        nuser[attr] = user[attr][0]
+
+    return print(nuser)
+
+
 if __name__ == '__main__':
     # Read and parse config file
     config = read_config()
@@ -118,6 +156,7 @@ if __name__ == '__main__':
     ZBX_USER = config.get('zabbix', 'zabbix_user')
     ZBX_PASS = config.get('zabbix', 'zabbix_pass')
     ZBX_GROUP = config.get('zabbix', 'zabbix_group_name')
+    ZBX_MEDIA_MAP = eval(config.get('zabbix', 'zabbix_media_map'))
 
     # Establish connection with AD server
     ldap_conn = ldap_connect(AD_SRV, AD_USER, AD_PASS)
@@ -144,11 +183,14 @@ if __name__ == '__main__':
 
     # Get users list of target group
     zbx_users = zapi.do_request(method="user.get", params={"usrgrpids": [zbx_group_id]})
-
+    # Get target mediatypes
+    media_params = {"filter": {"name": [media for media in ZBX_MEDIA_MAP.keys()]}, "output": ["mediatypeid", "name"]}
+    zbx_media = zapi.do_request(method="mediatype.get", params=media_params)
     # Create users for each group
     for group, users in ad_users_by_group.items():
-        if "USER" not in group:
-            for user in users:
+        for user in users:
+            check_res = check_aduser(user)
+            if check_res[0]:
                 alias = user['sAMAccountName'][0]
                 usertype = AD_GROUPS[group]
                 name = user['givenName'][0]
@@ -157,8 +199,12 @@ if __name__ == '__main__':
                 create_params = {"alias": alias, "usrgrps": [{"usrgrpid": zbx_group_id}], "type": usertype,
                                  "name": name, "surname": surname,
                                  "user_medias": [{"mediatypeid": "1", "sendto": [mail], "severity": "60"}]}
-                # create_params = {
-                #     "alias": "asand3r", "usrgrps": [{"usrgrpid": zbx_group_id}], "type": "3",
-                #     "name": "Alexander", "surname": "Khatsayuk",
-                #     "user_medias": [{"mediatypeid": "1", "sendto": ["asand3r@gexample.com"], "severity": "60"}]}
                 zapi.do_request(method="user.create", params=create_params)
+            else:
+                print(f'SKIPPING: User {user["sAMAccountName"][0]} has empty attributes: {check_res[1]}')
+            # create_params = {
+            #     "alias": "asand3r", "usrgrps": [{"usrgrpid": zbx_group_id}], "type": "3",
+            #     "name": "Alexander", "surname": "Khatsayuk",
+            #     "user_medias": [{"mediatypeid": "1", "sendto": ["asand3r@gexample.com"], "severity": "60"}]}
+    # Logout from Zabbix
+    # zapi.user.logout()
