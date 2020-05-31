@@ -96,7 +96,7 @@ def get_dn(conn, object_class, property_value, property_name='sAMAccountName'):
 
 def check_aduser(user):
     """
-    Check to all users attributes have a not-null value.
+    Check all users attributes to have a not-null value.
 
     :param user:
     Dict with user's attributes.
@@ -134,7 +134,7 @@ def prepare_aduser(user, gid, utype, mtypes):
     # Result dict with params for "user.create" method
     create_result = {}
 
-    # Normalize user
+    # Normalize user. User attrs are lists of one element till here.
     nuser = {}
     for attr, value in user.items():
         nuser[attr] = user[attr][0]
@@ -201,12 +201,12 @@ if __name__ == '__main__':
     # Establish connection with AD server
     ldap_conn = ldap_connect(AD_SRV, AD_USER, AD_PASS)
 
+    # Create a dict with users separated by AD groups
     ad_users_by_group = {}
     for group in AD_GROUPS.keys():
         group_dn = get_dn(ldap_conn, 'Group', group)
         if len(group_dn) > 1:
             raise SystemExit(f'ERROR: Found more than one groups for name {group}')
-        # Find users of group
         search_filter = f'(&{AD_USER_FILTER}(memberOf={group_dn[0]}))'
         ad_users = get_users(ldap_conn, search_filter, AD_ATTRS)
         ad_users_by_group[group] = [user.entry_attributes_as_dict for user in ad_users]
@@ -215,28 +215,40 @@ if __name__ == '__main__':
     zapi = ZabbixAPI(ZBX_API_URL)
     zapi.login(ZBX_USER, ZBX_PASS)
 
-    # Get target group ID
+    # Get target group ID and check it
     zbx_group = zapi.do_request(method="usergroup.get", params={"filter": {"name": ZBX_GROUP}})
-    if len(zbx_group['result']) != 1:
-        raise SystemExit(f'ERROR: Found more that 1 group with name {ZBX_GROUP} in Zabbix. That\'s weird')
+    if zbx_group['result'][0]['gui_access'] == '0':
+        print(f'WARNING: Target Zabbix group "{ZBX_GROUP}" not set to use LDAP authentication method.'
+              f' It\'s OK if default method is.')
+    elif zbx_group['result'][0]['gui_access'] in ('1', '3'):
+        raise SystemExit(f'ERROR: Target group is using internal authentication method or set to disable gui access.')
     zbx_group_id = zbx_group['result'][0]['usrgrpid']
 
     # Get users list of target group
     zbx_users = zapi.do_request(method="user.get", params={"usrgrpids": [zbx_group_id]})
+    zbx_users_logins = [zbx_user['alias'] for zbx_user in zbx_users['result']]
+
     # Get target mediatypes
     media_params = {"filter": {"name": [media for media in ZBX_USER_MEDIA_MAP.keys()]},
                     "output": ["mediatypeid", "name"]}
-    zbx_media = zapi.do_request(method="mediatype.get", params=media_params)
+    zbx_medias = zapi.do_request(method="mediatype.get", params=media_params)
 
     # Create users for each group
-    for group, users in ad_users_by_group.items():
-        for user in users:
-            check_res = check_aduser(user)
-            if check_res[0]:
-                create_params = prepare_aduser(user, zbx_group_id, AD_GROUPS[group], zbx_media['result'])
-                zapi.do_request(method="user.create", params=create_params)
+    for group, ad_users in ad_users_by_group.items():
+        for ad_user in ad_users:
+            ad_user_login = ad_user['sAMAccountName'][0]
+            # Create new user if it doesn't exist
+            if ad_user_login not in zbx_users_logins:
+                # Check given users attributes
+                check_result = check_aduser(ad_user)
+                if check_result[0]:
+                    create_params = prepare_aduser(ad_user, zbx_group_id, AD_GROUPS[group], zbx_medias['result'])
+                    zapi.do_request(method="user.create", params=create_params)
+                else:
+                    print(f'INFO: User {ad_user_login} has empty attributes: {check_result[1]}. Skip creating.')
+            # Update existing user in Zabbix
             else:
-                print(f'INFO: User {user["sAMAccountName"][0]} has empty attributes: {check_res[1]}. Skipping.')
+                print(f'STUB: User {ad_user_login} is present in Zabbix. Updating it.')
     # Logout from Zabbix
     # zapi.user.logout()
     # ldap_conn.unbind()
