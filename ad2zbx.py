@@ -94,19 +94,19 @@ def get_dn(conn, object_class, property_value, property_name='sAMAccountName'):
     return dn_list
 
 
-def check_aduser(user):
+def check_aduser_media(user):
     """
-    Check all users attributes to have a not-null value.
+    Check AD user media attributes to have a not-null value.
 
     :param user:
     Dict with user's attributes.
     :return:
-    List of True or False and list of empty attributes
+    Two element list of: Bool, empty_attrs
     """
 
     empty_attrs = []
-    for attr in AD_ATTRS:
-        if len(user[attr]) == 0:
+    for attr in ZBX_USER_MEDIA_MAP.values():
+        if user[attr] is None:
             empty_attrs.append(attr)
 
     if len(empty_attrs) == 0:
@@ -135,14 +135,9 @@ def prepare_to_create(user, gid, utype, mtypes):
     # Result dict with params for "user.create" method
     create_result = {}
 
-    # Normalize user. User attrs are lists of one element till here.
-    nuser = {}
-    for attr, value in user.items():
-        nuser[attr] = user[attr][0]
-
     # Adding static user parameters
     for user_prop, attr in ZBX_USER_ATTR_MAP.items():
-        create_result[user_prop] = nuser[attr]
+        create_result[user_prop] = user[attr]
 
     # Adding user group id
     create_result["usrgrps"] = [{"usrgrpid": gid}]
@@ -155,12 +150,12 @@ def prepare_to_create(user, gid, utype, mtypes):
     # Forming user medias list
     user_medias = []
     for zm, attr in ZBX_USER_MEDIA_MAP.items():
-        if zm == "Email":
-            # TODO: Add many email addresses?
-            media = {"mediatypeid": media_types[zm], "sendto": [nuser[attr]], "severity": "60"}
-        else:
-            media = {"mediatypeid": media_types[zm], "sendto": nuser[attr], "severity": "54"}
-        user_medias.append(media)
+        if user[attr] is not None:
+            if zm == "Email":
+                media = {"mediatypeid": media_types[zm], "sendto": [user[attr]], "severity": "60"}
+            else:
+                media = {"mediatypeid": media_types[zm], "sendto": user[attr], "severity": "54"}
+            user_medias.append(media)
     create_result["user_medias"] = user_medias
 
     return create_result
@@ -181,18 +176,15 @@ def prepare_to_update(user, zuser):
     # Result dict with params for "user.update" method
     update_result = {}
 
-    # Normalize user. User attrs are lists of one element till here.
-    # TODO: DRY! Same code in prepape_aduser()
-    nuser = {}
-    for attr, value in user.items():
-        nuser[attr] = user[attr][0]
-
     # Check common Zabbix user attributes
     for zbx_attr, ad_attr in ZBX_USER_ATTR_MAP.items():
-        if zuser[zbx_attr] != nuser[ad_attr]:
-            print(f'{zbx_attr} attributes are differ: Zabbix {zuser[zbx_attr]}, AD: {nuser[ad_attr]}')
+        if zuser[zbx_attr] != user[ad_attr]:
+            print(f'{zbx_attr} attributes are differ: Zabbix {zuser[zbx_attr]}, AD: {user[ad_attr]}')
             update_result['userid'] = zuser['userid']
-            update_result[zbx_attr] = nuser[ad_attr]
+            update_result[zbx_attr] = user[ad_attr]
+
+    # Check media Zabbix user attributes
+    # Prepare media types
 
     return update_result
 
@@ -211,7 +203,13 @@ if __name__ == '__main__':
     DEF_ZBX_USER_MEDIA_MAP = {"Email": "mail", "SMS": "mobile"}
     DEF_LDAP_USER_FILTER = "(ObjectClass=Person)(!(UserAccountControl:1.2.840.113556.1.4.803:=2))"
     DEF_LDAP_USER_ATTRS = "sAMAccountName, sn, givenName, mobile, mail"
+    DEF_MAIN_DISABLE_MISSING = False
+    DEF_MAIN_CREATE_WITH_EMPTY_MEDIA = False
 
+    # main section
+    MAIN_DISABLE_MISSING = config.getboolean('main', 'disable_missing', fallback=DEF_MAIN_DISABLE_MISSING)
+    MAIN_CREATE_WITH_EMPTY_MEDIA = config.getboolean('main', 'create_with_empty_media',
+                                                     fallback=DEF_MAIN_CREATE_WITH_EMPTY_MEDIA)
     # ldap section
     AD_SRV = config.get('ldap', 'ad_server')
     AD_USER = config.get('ldap', 'bind_user')
@@ -241,7 +239,11 @@ if __name__ == '__main__':
             raise SystemExit(f'ERROR: Found more than one groups for name {group}')
         search_filter = f'(&{AD_USER_FILTER}(memberOf={group_dn[0]}))'
         ad_users = get_users(ldap_conn, search_filter, AD_ATTRS)
-        ad_users_by_group[group] = [user.entry_attributes_as_dict for user in ad_users]
+        # ad_users_by_group[group] = [user.entry_attributes_as_dict for user in ad_users]
+        ad_users_list = []
+        for ad_user in ad_users:
+            ad_users_list.append({attr: ad_user[attr].value for attr in AD_ATTRS})
+            ad_users_by_group[group] = ad_users_list
 
     # Connect to Zabbix API
     zapi = ZabbixAPI(ZBX_API_URL)
@@ -268,23 +270,24 @@ if __name__ == '__main__':
     # Get list of Zabbix media types present in configuration file
     media_params = {"filter": {"name": [media for media in ZBX_USER_MEDIA_MAP.keys()]},
                     "output": ["mediatypeid", "name"]}
-    zbx_medias = zapi.do_request(method="mediatype.get", params=media_params)['result']
+    zbx_target_medias = zapi.do_request(method="mediatype.get", params=media_params)['result']
 
     # Prepare data for Zabbix
     users_to_create = []
     users_to_update = []
     for group, ad_users in ad_users_by_group.items():
         for ad_user in ad_users:
-            ad_user_login = ad_user['sAMAccountName'][0]
+            ad_user_login = ad_user['sAMAccountName']
             # Create new user if it doesn't exist
             if ad_user_login not in zbx_users_logins:
-                # Check given users attributes
-                check_result = check_aduser(ad_user)
-                if check_result[0]:
-                    create_params = prepare_to_create(ad_user, zbx_group_id, AD_GROUPS[group], zbx_medias)
+                # Check given users attributes for null values
+                check_result = check_aduser_media(ad_user)
+                # Create new user if: check return True as 1st element or create_with_empty_media set to True in config
+                if MAIN_CREATE_WITH_EMPTY_MEDIA or check_result[0]:
+                    create_params = prepare_to_create(ad_user, zbx_group_id, AD_GROUPS[group], zbx_target_medias)
                     users_to_create.append(create_params)
                 else:
-                    print(f'INFO: User {ad_user_login} has empty attributes: {check_result[1]}. Skip creating.')
+                    print(f'INFO: User {ad_user_login} has empty attributes: {check_result[1]}. Skipping.')
             # Update existing user in Zabbix
             else:
                 for zbx_user in zbx_users:
