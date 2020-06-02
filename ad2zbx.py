@@ -115,7 +115,7 @@ def check_aduser_media(user):
         return False, empty_attrs
 
 
-def prepare_to_create(user, gid, utype, mtypes):
+def prepare_to_create(user, gid, zu_type, zm_types):
     """
     Prepare dict from ldap3 to JSON document for Zabbix API.
 
@@ -123,15 +123,14 @@ def prepare_to_create(user, gid, utype, mtypes):
     Dict with user's attributes from 'entry_attributes_as_dict' ldap3 method
     :param gid:
     User group ID
-    :param utype"
+    :param zu_type"
     Usertype - Zabbix User, Zabbix Admin, Zabbix Super Admin
-    :param mtypes:
+    :param zm_types:
     Dict with media type IDs.
     :return:
     Dict for Zabbix API.
     """
 
-    # TODO: Rewrite all this shit. I feel really bad
     # Result dict with params for "user.create" method
     create_result = {}
 
@@ -142,35 +141,34 @@ def prepare_to_create(user, gid, utype, mtypes):
     # Adding user group id
     create_result["usrgrps"] = [{"usrgrpid": gid}]
     # Adding user type
-    create_result["type"] = utype
-
-    # Prepare media types
-    media_types = {mt['name']: mt['mediatypeid'] for mt in mtypes}
+    create_result["type"] = zu_type
 
     # Forming user medias list
     user_medias = []
     for zm, attr in ZBX_USER_MEDIA_MAP.items():
         if user[attr] is not None:
             if zm == "Email":
-                media = {"mediatypeid": media_types[zm], "sendto": [user[attr]], "severity": "60"}
+                media = {"mediatypeid": zm_types[zm], "sendto": [user[attr]], "severity": "60"}
             else:
-                media = {"mediatypeid": media_types[zm], "sendto": user[attr], "severity": "54"}
+                media = {"mediatypeid": zm_types[zm], "sendto": user[attr], "severity": "54"}
             user_medias.append(media)
     create_result["user_medias"] = user_medias
 
     return create_result
 
 
-def prepare_to_update(user, zuser):
+def prepare_to_update(user, zuser, zm_types):
     """
     Prepare JSON object to update existing users in Zabbix.
 
     :param user:
-    JSON with AD user
+    Dict with AD user
     :param zuser:
-    JSON with Zabbix user
+    Dict with Zabbix user
+    :param zm_types:
+    Dict with Zabbix medias
     :return:
-    Dict for Zabbix API.
+    Dict for Zabbix API user.update method.
     """
 
     # Result dict with params for "user.update" method
@@ -180,12 +178,47 @@ def prepare_to_update(user, zuser):
     for zbx_attr, ad_attr in ZBX_USER_ATTR_MAP.items():
         if zuser[zbx_attr] != user[ad_attr]:
             print(f'{zbx_attr} attributes are differ: Zabbix {zuser[zbx_attr]}, AD: {user[ad_attr]}')
-            update_result['userid'] = zuser['userid']
             update_result[zbx_attr] = user[ad_attr]
 
     # Check media Zabbix user attributes
-    # Prepare media types
-
+    update_list = []
+    # If Zabbix user media is empty - fill it with AD values
+    if len(zuser['medias']) == 0:
+        # Forming user medias list
+        for zm, attr in ZBX_USER_MEDIA_MAP.items():
+            if user[attr] is not None:
+                if zm == "Email":
+                    media = {"mediatypeid": zm_types[zm], "sendto": [user[attr]], "severity": "60"}
+                else:
+                    media = {"mediatypeid": zm_types[zm], "sendto": user[attr], "severity": "54"}
+                update_list.append(media)
+        update_result["user_medias"] = update_list
+    elif len(zuser['medias']) != 0:
+        # Check each Zabbix user media and update it if need
+        for zm_name, attr in ZBX_USER_MEDIA_MAP.items():
+            # For each current media in users media
+            for zu_media in zuser['medias']:
+                zu_mt_id = zu_media['mediatypeid']
+                zu_mt_sendto = zu_media['sendto'][0] if type(zu_media['sendto']) is list else zu_media['sendto']
+                if zu_mt_id == zm_types[zm_name]:
+                    if zm_name == "Email" and zu_mt_sendto != user[attr]:
+                        print(f'Zabbix user media differ than AD attr: {zu_mt_sendto} => {user[attr]}')
+                        if user[attr] is not None:
+                            update_list.append({'mediatypeid': zu_mt_id, "sendto": [user[attr]]})
+                        else:
+                            continue
+                    elif zm_name != "Email" and zu_mt_sendto != user[attr]:
+                        print(f'Zabbix user media differ than AD attr: {zu_mt_sendto} => {user[attr]}')
+                        if user[attr] is not None:
+                            update_list.append({'mediatypeid': zu_mt_id, "sendto": user[attr]})
+                        else:
+                            continue
+        if len(update_list) != 0:
+            update_result['user_medias'] = update_list
+    print(update_result)
+    # Add user id to result dict
+    if len(update_result) != 0:
+        update_result['userid'] = zuser['userid']
     return update_result
 
 
@@ -262,15 +295,16 @@ if __name__ == '__main__':
         raise SystemExit(f'ERROR: Cannot find group "{ZBX_GROUP}" in Zabbix.')
 
     # Get users of target Zabbix group
-    zbx_users = zapi.do_request(method="user.get", params={"usrgrpids": [zbx_group_id],
-                                                           "selectMedias": "extend"})['result']
+    users_params = {"usrgrpids": [zbx_group_id], "selectMedias": "extend", "output": list(ZBX_USER_ATTR_MAP.keys())}
+    zbx_users = zapi.do_request(method="user.get", params=users_params)['result']
     # Create a list just of Zabbix user logins
     zbx_users_logins = [zbx_user['alias'] for zbx_user in zbx_users]
 
-    # Get list of Zabbix media types present in configuration file
-    media_params = {"filter": {"name": [media for media in ZBX_USER_MEDIA_MAP.keys()]},
+    # Get list of Zabbix media types set in configuration file
+    media_params = {"filter": {"name": list(ZBX_USER_MEDIA_MAP.keys())},
                     "output": ["mediatypeid", "name"]}
     zbx_target_medias = zapi.do_request(method="mediatype.get", params=media_params)['result']
+    zbx_media_to_attr_map = {zm['name']: zm['mediatypeid'] for zm in zbx_target_medias}
 
     # Prepare data for Zabbix
     users_to_create = []
@@ -284,7 +318,7 @@ if __name__ == '__main__':
                 check_result = check_aduser_media(ad_user)
                 # Create new user if: check return True as 1st element or create_with_empty_media set to True in config
                 if MAIN_CREATE_WITH_EMPTY_MEDIA or check_result[0]:
-                    create_params = prepare_to_create(ad_user, zbx_group_id, AD_GROUPS[group], zbx_target_medias)
+                    create_params = prepare_to_create(ad_user, zbx_group_id, AD_GROUPS[group], zbx_media_to_attr_map)
                     users_to_create.append(create_params)
                 else:
                     print(f'INFO: User {ad_user_login} has empty attributes: {check_result[1]}. Skipping.')
@@ -292,7 +326,7 @@ if __name__ == '__main__':
             else:
                 for zbx_user in zbx_users:
                     if zbx_user['alias'] == ad_user_login:
-                        update_params = prepare_to_update(ad_user, zbx_user)
+                        update_params = prepare_to_update(ad_user, zbx_user, zbx_media_to_attr_map)
                         if len(update_params) != 0:
                             users_to_update.append(update_params)
 
@@ -302,6 +336,7 @@ if __name__ == '__main__':
         zapi.do_request(method="user.create", params=users_to_create)
     else:
         print(f'DEBUG: list of users to create is empty. Nothing to do')
+
     # Update users in Zabbix
     if len(users_to_update) != 0:
         print(f'DEBUG: update list of users: {users_to_update}')
