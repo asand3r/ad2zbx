@@ -147,10 +147,8 @@ def prepare_to_create(user, gid, zu_type, zm_types):
     user_medias = []
     for zm, attr in ZBX_USER_MEDIA_MAP.items():
         if user[attr] is not None:
-            if zm == "Email":
-                media = {"mediatypeid": zm_types[zm], "sendto": [user[attr]], "severity": ZBX_MEDIA_SEVERITIES[zm]}
-            else:
-                media = {"mediatypeid": zm_types[zm], "sendto": user[attr], "severity": ZBX_MEDIA_SEVERITIES[zm]}
+            zm_sendto = [user[attr]] if zm == "Email" else user[attr]
+            media = {"mediatypeid": zm_types[zm], "sendto": zm_sendto, "severity": ZBX_MEDIA_SEVERITIES[zm]}
             user_medias.append(media)
     create_result["user_medias"] = user_medias
 
@@ -177,58 +175,51 @@ def prepare_to_update(user, zuser, zm_types):
     # Check common Zabbix user attributes
     for zm, ad_attr in ZBX_USER_ATTR_MAP.items():
         if zuser[zm] != user[ad_attr]:
-            print(f'{zm} attributes are differ: Zabbix {zuser[zm]}, AD: {user[ad_attr]}')
             update_result[zm] = user[ad_attr]
 
-    # Check media Zabbix user attributes
-    update_list = []
-
-    # If Zabbix user media is empty - fill it with AD values
+    # List of Zabbix medias to update
+    update_medias = []
+    # TODO: DRY! Look at prepare_to_create function
+    # If all Zabbix user medias are empty - fill it with AD values
     if len(zuser['medias']) == 0:
-        # Forming user medias list
         for zm, attr in ZBX_USER_MEDIA_MAP.items():
             if user[attr] is not None:
-                if zm == "Email":
-                    media = {"mediatypeid": zm_types[zm], "sendto": [user[attr]], "severity": ZBX_MEDIA_SEVERITIES[zm]}
-                else:
-                    media = {"mediatypeid": zm_types[zm], "sendto": user[attr], "severity": ZBX_MEDIA_SEVERITIES[zm]}
-                update_list.append(media)
-        update_result["user_medias"] = update_list
+                zm_sendto = [user[attr]] if zm == "Email" else user[attr]
+                media = {"mediatypeid": zm_types[zm], "sendto": zm_sendto, "severity": ZBX_MEDIA_SEVERITIES[zm]}
+                update_medias.append(media)
+        update_result["user_medias"] = update_medias
     elif len(zuser['medias']) != 0:
         # Current Zabbix User media list
         zbx_user_media_list = [{"mediatypeid": media['mediatypeid'],
                                 "sendto": media['sendto'], "severity": media['severity']} for media in zuser['medias']]
+        # AD user media list
         ad_user_media_list = []
         for zm, attr in ZBX_USER_MEDIA_MAP.items():
             # Do not compare with empty AD attribute
             if user[attr] is not None:
-                if zm == "Email":
-                    ad_user_media_list.append({"mediatypeid": zbx_media_to_attr_map[zm],
-                                               "sendto": [user[attr]],
-                                               "severity": ZBX_MEDIA_SEVERITIES[zm]})
-                else:
-                    ad_user_media_list.append({"mediatypeid": zbx_media_to_attr_map[zm],
-                                               "sendto": user[attr],
-                                               "severity": ZBX_MEDIA_SEVERITIES[zm]})
+                zm_sendto = [user[attr]] if zm == "Email" else user[attr]
+                ad_user_media_list.append({"mediatypeid": zbx_media_to_attr_map[zm],
+                                           "sendto": zm_sendto,
+                                           "severity": ZBX_MEDIA_SEVERITIES[zm]})
         # Sorting AD and ZBX media lists to simple compare it
         sorted_ad_user_media_list = sorted(ad_user_media_list, key=lambda k: k['mediatypeid'])
         sorted_zbx_user_media_list = sorted(zbx_user_media_list, key=lambda k: k['mediatypeid'])
         if sorted_ad_user_media_list != sorted_zbx_user_media_list:
             for ad_media in ad_user_media_list:
-                ad_media_id = ad_media['mediatypeid']
+                ad_media_id, ad_media_sendto, ad_media_severity = ad_media.values()
                 for zbx_media in zbx_user_media_list:
                     if ad_media_id in [zm['mediatypeid'] for zm in zbx_user_media_list]:
-                        zbx_media_id = zbx_media['mediatypeid']
+                        zbx_media_id, zbx_media_sendto, zbx_media_severity = zbx_media.values()
                         if zbx_media_id == ad_media_id:
-                            if ad_media['sendto'] == zbx_media['sendto'] and ad_media['severity'] == zbx_media['severity']:
-                                update_list.append(zbx_media)
+                            if ad_media_sendto == zbx_media_sendto and ad_media_severity == zbx_media_severity:
+                                update_medias.append(zbx_media)
                             else:
-                                update_list.append(ad_media)
+                                update_medias.append(ad_media)
                     else:
-                        update_list.append(ad_media)
+                        update_medias.append(ad_media)
         # Append list with medias to result dict
-        if len(update_list) != 0:
-            update_result['user_medias'] = update_list
+        if len(update_medias) != 0:
+            update_result['user_medias'] = update_medias
     # Add user id to result dict
     if len(update_result) != 0:
         update_result['userid'] = zuser['userid']
