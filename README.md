@@ -9,4 +9,5 @@ Script to import users from Microsoft Active Directory groups to Zabbix Monitori
 - ldap3
 
 ## Features
-- Creating new users from given list of Active Directory groups
+- Create new users from given list of Active Directory groups
+- Update existing users from Active Directory
