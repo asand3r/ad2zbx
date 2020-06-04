@@ -148,9 +148,9 @@ def prepare_to_create(user, gid, zu_type, zm_types):
     for zm, attr in ZBX_USER_MEDIA_MAP.items():
         if user[attr] is not None:
             if zm == "Email":
-                media = {"mediatypeid": zm_types[zm], "sendto": [user[attr]], "severity": "60"}
+                media = {"mediatypeid": zm_types[zm], "sendto": [user[attr]], "severity": ZBX_MEDIA_SEVERITIES[zm]}
             else:
-                media = {"mediatypeid": zm_types[zm], "sendto": user[attr], "severity": "54"}
+                media = {"mediatypeid": zm_types[zm], "sendto": user[attr], "severity": ZBX_MEDIA_SEVERITIES[zm]}
             user_medias.append(media)
     create_result["user_medias"] = user_medias
 
@@ -175,47 +175,60 @@ def prepare_to_update(user, zuser, zm_types):
     update_result = {}
 
     # Check common Zabbix user attributes
-    for zbx_attr, ad_attr in ZBX_USER_ATTR_MAP.items():
-        if zuser[zbx_attr] != user[ad_attr]:
-            print(f'{zbx_attr} attributes are differ: Zabbix {zuser[zbx_attr]}, AD: {user[ad_attr]}')
-            update_result[zbx_attr] = user[ad_attr]
+    for zm, ad_attr in ZBX_USER_ATTR_MAP.items():
+        if zuser[zm] != user[ad_attr]:
+            print(f'{zm} attributes are differ: Zabbix {zuser[zm]}, AD: {user[ad_attr]}')
+            update_result[zm] = user[ad_attr]
 
     # Check media Zabbix user attributes
     update_list = []
+
     # If Zabbix user media is empty - fill it with AD values
     if len(zuser['medias']) == 0:
         # Forming user medias list
         for zm, attr in ZBX_USER_MEDIA_MAP.items():
             if user[attr] is not None:
                 if zm == "Email":
-                    media = {"mediatypeid": zm_types[zm], "sendto": [user[attr]], "severity": "60"}
+                    media = {"mediatypeid": zm_types[zm], "sendto": [user[attr]], "severity": ZBX_MEDIA_SEVERITIES[zm]}
                 else:
-                    media = {"mediatypeid": zm_types[zm], "sendto": user[attr], "severity": "54"}
+                    media = {"mediatypeid": zm_types[zm], "sendto": user[attr], "severity": ZBX_MEDIA_SEVERITIES[zm]}
                 update_list.append(media)
         update_result["user_medias"] = update_list
     elif len(zuser['medias']) != 0:
-        # Check each Zabbix user media and update it if need
-        for zm_name, attr in ZBX_USER_MEDIA_MAP.items():
-            # For each current media in users media
-            for zu_media in zuser['medias']:
-                zu_mt_id = zu_media['mediatypeid']
-                zu_mt_sendto = zu_media['sendto'][0] if type(zu_media['sendto']) is list else zu_media['sendto']
-                if zu_mt_id == zm_types[zm_name]:
-                    if zm_name == "Email" and zu_mt_sendto != user[attr]:
-                        print(f'Zabbix user media differ than AD attr: {zu_mt_sendto} => {user[attr]}')
-                        if user[attr] is not None:
-                            update_list.append({'mediatypeid': zu_mt_id, "sendto": [user[attr]]})
-                        else:
-                            continue
-                    elif zm_name != "Email" and zu_mt_sendto != user[attr]:
-                        print(f'Zabbix user media differ than AD attr: {zu_mt_sendto} => {user[attr]}')
-                        if user[attr] is not None:
-                            update_list.append({'mediatypeid': zu_mt_id, "sendto": user[attr]})
-                        else:
-                            continue
+        # Current Zabbix User media list
+        zbx_user_media_list = [{"mediatypeid": media['mediatypeid'],
+                                "sendto": media['sendto'], "severity": media['severity']} for media in zuser['medias']]
+        ad_user_media_list = []
+        for zm, attr in ZBX_USER_MEDIA_MAP.items():
+            # Do not compare with empty AD attribute
+            if user[attr] is not None:
+                if zm == "Email":
+                    ad_user_media_list.append({"mediatypeid": zbx_media_to_attr_map[zm],
+                                               "sendto": [user[attr]],
+                                               "severity": ZBX_MEDIA_SEVERITIES[zm]})
+                else:
+                    ad_user_media_list.append({"mediatypeid": zbx_media_to_attr_map[zm],
+                                               "sendto": user[attr],
+                                               "severity": ZBX_MEDIA_SEVERITIES[zm]})
+        # Sorting AD and ZBX media lists to simple compare it
+        sorted_ad_user_media_list = sorted(ad_user_media_list, key=lambda k: k['mediatypeid'])
+        sorted_zbx_user_media_list = sorted(zbx_user_media_list, key=lambda k: k['mediatypeid'])
+        if sorted_ad_user_media_list != sorted_zbx_user_media_list:
+            for ad_media in ad_user_media_list:
+                ad_media_id = ad_media['mediatypeid']
+                for zbx_media in zbx_user_media_list:
+                    if ad_media_id in [zm['mediatypeid'] for zm in zbx_user_media_list]:
+                        zbx_media_id = zbx_media['mediatypeid']
+                        if zbx_media_id == ad_media_id:
+                            if ad_media['sendto'] == zbx_media['sendto'] and ad_media['severity'] == zbx_media['severity']:
+                                update_list.append(zbx_media)
+                            else:
+                                update_list.append(ad_media)
+                    else:
+                        update_list.append(ad_media)
+        # Append list with medias to result dict
         if len(update_list) != 0:
             update_result['user_medias'] = update_list
-    print(update_result)
     # Add user id to result dict
     if len(update_result) != 0:
         update_result['userid'] = zuser['userid']
@@ -225,6 +238,10 @@ def prepare_to_update(user, zuser, zm_types):
 if __name__ == '__main__':
     # Read and parse config file
     config = read_config()
+
+    # TODO: Constants to config
+    # Constants
+    ZBX_MEDIA_SEVERITIES = {"Email": "60", "SMS": "48"}
 
     # Check that config file defines all mandatory sections
     for section in ['ldap', 'zabbix']:
