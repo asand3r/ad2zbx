@@ -7,21 +7,6 @@ from configparser import RawConfigParser
 from ldap3.core.exceptions import LDAPSocketOpenError
 
 
-class Person:
-
-    def __init__(self, name, surname, mobile, email):
-        self.name = name
-        self.surname = surname
-        self.mobile = mobile
-        self.email = email
-
-    def __str__(self):
-        return f'Person is:\nSurname: {self.surname}\nName: {self.name}\nMobile: {self.mobile}\nEmail: {self.email}'
-
-    def __repr__(self):
-        return self.surname
-
-
 def read_config(path='ad2zbx.conf'):
     """
     Read ad2zbx.conf config file.
