@@ -61,6 +61,8 @@ def ldap_connect(ldap_server, bind_user, bind_password):
         conn = ldap3.Connection(srv, auto_bind=True, authentication=ldap3.NTLM, user=bind_user, password=bind_password)
     except LDAPSocketOpenError as e:
         raise SystemExit('ERROR: {}'.format(e.__str__()))
+    except ConnectionError as e:
+        raise SystemExit('ERROR: {}'.format(e.__str__()))
     return conn
 
 
@@ -145,25 +147,31 @@ def prepare_to_create(user, gid, zu_type, zm_types):
     """
 
     # Result dict with params for "user.create" method
-    create_result = {}
+    result = {}
 
     # Adding static user parameters
     for user_prop, attr in ZBX_USER_ATTR_MAP.items():
-        create_result[user_prop] = user[attr]
-    create_result["usrgrps"] = [{"usrgrpid": gid}]
-    create_result["type"] = zu_type
+        if attr in PREP_STEPS.keys():
+            attr = do_prep(attr, PREP_STEPS[attr])
+        result[user_prop] = user[attr]
+    result["usrgrps"] = [{"usrgrpid": gid}]
+    result["type"] = zu_type
 
     # Forming user medias list
     user_medias = []
     for zm, attr in ZBX_USER_MEDIA_MAP.items():
-        if user[attr[0]] is not None:
+        ldap_attr_name = attr[0]
+        ldap_attr_value = user[ldap_attr_name]
+        if ldap_attr_value is not None:
+            if ldap_attr_name in PREP_STEPS.keys():
+                ldap_attr_value = do_prep(ldap_attr_value, PREP_STEPS[ldap_attr_name])
             # TODO: Rewrite zm_sendto
-            zm_sendto = [user[attr[0]]] if zm_types[zm]['type'] == '0' else user[attr[0]]
+            zm_sendto = [ldap_attr_value] if zm_types[zm]['type'] == '0' else ldap_attr_value
             media = {"mediatypeid": zm_types[zm]['mtid'], "sendto": zm_sendto, "severity": ZBX_USER_MEDIA_MAP[zm][1]}
             user_medias.append(media)
-    create_result["user_medias"] = user_medias
+    result["user_medias"] = user_medias
 
-    return create_result
+    return result
 
 
 def prepare_to_update(user, zuser, zm_types):
@@ -181,12 +189,12 @@ def prepare_to_update(user, zuser, zm_types):
     """
 
     # Result dict with params for "user.update" method
-    update_result = {}
+    result = {}
 
     # Check common Zabbix user attributes
     for zm, ad_attr in ZBX_USER_ATTR_MAP.items():
         if zuser[zm] != user[ad_attr]:
-            update_result[zm] = user[ad_attr]
+            result[zm] = user[ad_attr]
 
     # List of Zabbix medias to update
     update_medias = []
@@ -201,7 +209,7 @@ def prepare_to_update(user, zuser, zm_types):
                 zm_severity = ZBX_USER_MEDIA_MAP[zm][1]
                 media = {"mediatypeid": zm_mtid, "sendto": zm_sendto, "severity": zm_severity}
                 update_medias.append(media)
-        update_result["user_medias"] = update_medias
+        result["user_medias"] = update_medias
     elif len(zuser['medias']) != 0:
         # Current Zabbix User media list
         zbx_user_media_list = [{"mediatypeid": media['mediatypeid'],
@@ -235,24 +243,45 @@ def prepare_to_update(user, zuser, zm_types):
                         update_medias.append(ldap_media)
         # Append list with medias to result dict
         if len(update_medias) != 0:
-            update_result['user_medias'] = update_medias
+            result['user_medias'] = update_medias
     # Add user id to result dict
-    if len(update_result) != 0:
-        update_result['userid'] = zuser['userid']
-    return update_result
+    if len(result) != 0:
+        result['userid'] = zuser['userid']
+    return result
 
 
-def do_preprocessing(value, steps):
+def do_prep(value, steps):
+    """
+    Preprocessing for values received from LDAP catalog.
 
-    steps = eval(steps)
-    for action, arg in steps.items():
-        print(action, arg)
-        if action == 'replace':
-            value = value.replace(arg.split(', ')[0], arg.split(', ')[1])
-        if action == 'add_suffix':
-            value = value + arg
-        else:
-            print(f'Unknown preprocessing step {action}')
+    :param value:
+    Value from LDAP.
+    :param steps:
+    Dict object as a string.
+    :return:
+    String
+    """
+
+    # Check value is as string
+    if not isinstance(value, str):
+        raise TypeError(f'ERROR: {value} must be a string, but it\'s a {type(value)}')
+    print(value, steps)
+    for func, args in steps.items():
+        if func == 'replace':
+            if len(args) == 2:
+                value = value.replace(args[0], args[1])
+            else:
+                raise ValueError(f'ERROR: Replace step must contains two arguments but {len(args)} given')
+        elif func == 'remove_spaces':
+            value = value.replace(" ", "")
+        elif func == 'add_suffix':
+            value = value + args
+        elif func == 'add_prefix':
+            value = args + value
+        elif func == 'to_lower':
+            value = value.lower()
+        elif func == 'to_upper':
+            value = value.upper()
     return value
 
 
@@ -300,6 +329,16 @@ if __name__ == '__main__':
     ZBX_GROUP = config.get('zabbix', 'zbx_group_name')
     ZBX_USER_MEDIA_MAP = eval(config.get('zabbix', 'zbx_user_media_map', fallback=DEF_ZBX_USER_MEDIA_MAP))
     ZBX_USER_ATTR_MAP = eval(config.get('zabbix', 'zbx_user_attr_map', fallback=DEF_ZBX_USER_ATTR_MAP))
+
+    # preprocessing section
+    if config.has_section('preprocessing') and config.items('preprocessing'):
+        PREP_STEPS = {}
+        for attr, prep_steps in config.items('preprocessing'):
+            try:
+                prep_steps = eval(prep_steps)
+            except SyntaxError:
+                raise SyntaxError(f'ERROR: Cannot parse {prep_steps[1]} as dict for step {prep_steps}')
+            PREP_STEPS[attr] = prep_steps
 
     # Establish connection with AD server
     ldap_conn = ldap_connect(LDAP_SRV, LDAP_USER, LDAP_PASS)
