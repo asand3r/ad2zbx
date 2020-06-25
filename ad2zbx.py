@@ -7,6 +7,20 @@ from configparser import RawConfigParser
 from ldap3.core.exceptions import LDAPSocketOpenError
 
 
+class Person:
+    def __init__(self, alias, surname, name, media):
+        self.alias = alias
+        self.surname = surname
+        self.name = name
+        self.media = media
+
+    def __repr__(self):
+        return f'{self.alias}, {self.surname} {self.name}'
+
+    def __str__(self):
+        return f'User ID: {self.alias}\nUser surname: {self.surname}\nUser name: {self.name}'
+
+
 def read_config(path='ad2zbx.conf'):
     """
     Read ad2zbx.conf config file.
@@ -24,8 +38,8 @@ def read_config(path='ad2zbx.conf'):
     else:
         # Creating 'startup_error.log' if config file cannot be open
         with open('startup_error.log', 'w') as err_file:
-            err_file.write('ERROR: Cannot find "ad2zbx.conf" in current directory.')
-            raise SystemExit('Missing config file (csv2ldap.conf) in current directory')
+            err_file.write(f'ERROR: Cannot find "{path}" in current directory.')
+            raise SystemExit(f'Missing config file ({path}) in current directory')
 
 
 def ldap_connect(ldap_server, bind_user, bind_password):
@@ -85,10 +99,10 @@ def get_dn(conn, object_class, property_value, property_name='sAMAccountName'):
     List
     """
 
-    filter_str = f'(&(objectClass={object_class})({property_name}={property_value}))'
+    ldap_filter = f'(&(objectClass={object_class})({property_name}={property_value}))'
 
     # Search in LDAP with our filter
-    conn.search(conn.server.info.other['DefaultNamingContext'], filter_str)
+    conn.search(conn.server.info.other['DefaultNamingContext'], ldap_filter)
     dn_list = [entry.entry_dn for entry in conn.entries]
     return dn_list
 
@@ -228,6 +242,20 @@ def prepare_to_update(user, zuser, zm_types):
     return update_result
 
 
+def do_preprocessing(value, steps):
+
+    steps = eval(steps)
+    for action, arg in steps.items():
+        print(action, arg)
+        if action == 'replace':
+            value = value.replace(arg.split(', ')[0], arg.split(', ')[1])
+        if action == 'add_suffix':
+            value = value + arg
+        else:
+            print(f'Unknown preprocessing step {action}')
+    return value
+
+
 if __name__ == '__main__':
     # Read and parse config file
     config = read_config()
@@ -240,11 +268,12 @@ if __name__ == '__main__':
     # Default parameters
     DEF_LDAP_USER_FILTER = "(ObjectClass=Person)(!(UserAccountControl:1.2.840.113556.1.4.803:=2))"
     DEF_LDAP_USER_ID_ATTR = "sAMAccountName"
-    DEF_LDAP_USER_ATTRS = "{}, sn, givenName, mobile, mail".format(DEF_LDAP_USER_ID_ATTR)
+    DEF_LDAP_USER_ATTRS = f'{DEF_LDAP_USER_ID_ATTR}, sn, givenName, mobile, mail'
     DEF_MAIN_DISABLE_MISSING = False
     DEF_MAIN_CREATE_WITH_EMPTY_MEDIA = False
     DEF_ZBX_USER_ATTR_MAP = {"alias": DEF_LDAP_USER_ID_ATTR, "name": "givenName", "surname": "sn"}
     DEF_ZBX_USER_MEDIA_MAP = {"Email": "mail", "SMS": "mobile"}
+    DEF_ZBX_API_VERIFY_SSL = False
 
     # main section
     MAIN_DISABLE_MISSING = config.getboolean('main', 'disable_missing', fallback=DEF_MAIN_DISABLE_MISSING)
@@ -256,13 +285,16 @@ if __name__ == '__main__':
     LDAP_PASS = config.get('ldap', 'ldap_pass')
     LDAP_SSL = config.getboolean('ldap', 'use_ssl', fallback=False)
     LDAP_GROUPS = eval(config.get('ldap', 'group_names_map'))
-    LDAP_ATTRS = [attr for attr in config.get('ldap', 'ldap_user_attrs',
-                                              fallback=DEF_LDAP_USER_ATTRS).replace(" ", "").split(",")]
     LDAP_USER_FILTER = config.get('ldap', 'ldap_user_filter', fallback=DEF_LDAP_USER_FILTER)
     LDAP_USER_ID_ATTR = config.get('ldap', 'ldap_user_id_attr', fallback=DEF_LDAP_USER_ID_ATTR)
+    # TODO: May it be written better?
+    LDAP_USER_ATTRS = [attr for attr in config.get('ldap', 'ldap_user_attrs',
+                                                   fallback=DEF_LDAP_USER_ATTRS).replace(" ", "").split(",")]
+    LDAP_USER_ATTRS = set([LDAP_USER_ID_ATTR] + LDAP_USER_ATTRS)
 
     # zabbix section
     ZBX_API_URL = config.get('zabbix', 'zbx_api_url')
+    ZBX_API_VERIFY_SSL = config.get('zabbix', 'verify_ssl', fallback=DEF_ZBX_API_VERIFY_SSL)
     ZBX_USER = config.get('zabbix', 'zbx_user')
     ZBX_PASS = config.get('zabbix', 'zbx_pass')
     ZBX_GROUP = config.get('zabbix', 'zbx_group_name')
@@ -279,17 +311,18 @@ if __name__ == '__main__':
         if len(group_dn) > 1:
             raise SystemExit(f'ERROR: Found more than one groups for name {group}')
         search_filter = f'(&{LDAP_USER_FILTER}(memberOf={group_dn[0]}))'
-        ad_users = get_users(ldap_conn, search_filter, LDAP_ATTRS)
+        ad_users = get_users(ldap_conn, search_filter, LDAP_USER_ATTRS)
         if len(ad_users) == 0:
             raise SystemExit(f'ERROR: LDAP query returned 0 users')
         # ad_users_by_group[group] = [user.entry_attributes_as_dict for user in ad_users]
         ad_users_list = []
         for ad_user in ad_users:
-            ad_users_list.append({attr: ad_user[attr].value for attr in LDAP_ATTRS})
+            ad_users_list.append({attr: ad_user[attr].value for attr in LDAP_USER_ATTRS})
             ad_users_by_group[group] = ad_users_list
 
     # Connect to Zabbix API
     zapi = ZabbixAPI(ZBX_API_URL)
+    zapi.session.verify = ZBX_API_VERIFY_SSL
     zapi.login(ZBX_USER, ZBX_PASS)
 
     # Get target group ID and check it
@@ -316,8 +349,7 @@ if __name__ == '__main__':
     # 1 - script;
     # 2 - SMS;
     # 4 - Webhook.
-    media_params = {"filter": {"name": list(ZBX_USER_MEDIA_MAP.keys())},
-                    "output": ["mediatypeid", "name", "type"]}
+    media_params = {"filter": {"name": list(ZBX_USER_MEDIA_MAP.keys())}, "output": ["mediatypeid", "name", "type"]}
     zbx_target_medias = zapi.do_request(method="mediatype.get", params=media_params)['result']
     zbx_attr_media_map = {zm['name']: {"mtid": zm['mediatypeid'], "type": zm['type']} for zm in zbx_target_medias}
 
