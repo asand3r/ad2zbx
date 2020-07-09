@@ -286,7 +286,7 @@ if __name__ == '__main__':
     DEF_MAIN_DISABLE_MISSING = False
     DEF_MAIN_CREATE_WITH_EMPTY_MEDIA = False
     DEF_ZBX_USER_ATTR_MAP = {"alias": DEF_LDAP_USER_ID_ATTR, "name": "givenName", "surname": "sn"}
-    DEF_ZBX_USER_MEDIA_MAP = {"Email": "mail", "SMS": "mobile"}
+    DEF_ZBX_USER_MEDIA_MAP = {"Email": ["mail", 60], "SMS": ["mobile", 48]}
     DEF_ZBX_API_VERIFY_SSL = False
 
     # main section
