@@ -7,20 +7,6 @@ from configparser import RawConfigParser
 from ldap3.core.exceptions import LDAPSocketOpenError
 
 
-class Person:
-    def __init__(self, alias, surname, name, media):
-        self.alias = alias
-        self.surname = surname
-        self.name = name
-        self.media = media
-
-    def __repr__(self):
-        return f'{self.alias}, {self.surname} {self.name}'
-
-    def __str__(self):
-        return f'User ID: {self.alias}\nUser surname: {self.surname}\nUser name: {self.name}'
-
-
 def read_config(path='ad2zbx.conf'):
     """
     Read ad2zbx.conf config file.
@@ -60,9 +46,9 @@ def ldap_connect(ldap_server, bind_user, bind_password):
     try:
         conn = ldap3.Connection(srv, auto_bind=True, authentication=ldap3.NTLM, user=bind_user, password=bind_password)
     except LDAPSocketOpenError as e:
-        raise SystemExit('ERROR: {}'.format(e.__str__()))
+        raise SystemExit(f'ERROR: {e.__str__()}')
     except ConnectionError as e:
-        raise SystemExit('ERROR: {}'.format(e.__str__()))
+        raise SystemExit(f'ERROR: {e.__str__()}')
     return conn
 
 
@@ -130,7 +116,7 @@ def check_aduser_media(user):
         return False, empty_attrs
 
 
-def prepare_to_create(user, gid, zu_type, zm_types):
+def prepare_to_create(user, gid, zm_types):
     """
     Prepare dict from ldap3 to JSON document for Zabbix API.
 
@@ -138,8 +124,6 @@ def prepare_to_create(user, gid, zu_type, zm_types):
     Dict with user's attributes from 'entry_attributes_as_dict' ldap3 method
     :param gid:
     User group ID
-    :param zu_type:
-    Usertype - Zabbix User, Zabbix Admin, Zabbix Super Admin
     :param zm_types:
     Dict with mediatype ID and type
     :return:
@@ -153,7 +137,6 @@ def prepare_to_create(user, gid, zu_type, zm_types):
     for user_prop, attr in ZBX_USER_ATTR_MAP.items():
         result[user_prop] = user[attr]
     result["usrgrps"] = [{"usrgrpid": gid}]
-    result["type"] = zu_type
 
     # Forming user medias list
     user_medias = []
@@ -170,7 +153,7 @@ def prepare_to_create(user, gid, zu_type, zm_types):
     return result
 
 
-def prepare_to_update(user, zuser, target_perm, zm_types):
+def prepare_to_update(user, zuser, zm_types):
     """
     Prepare JSON object to update existing users in Zabbix.
 
@@ -178,8 +161,6 @@ def prepare_to_update(user, zuser, target_perm, zm_types):
     Dict with AD user
     :param zuser:
     Dict with Zabbix user
-    :param target_perm:
-    Target user type - User, Admin, Super Admin
     :param zm_types:
     Dict with Zabbix medias
     :return:
@@ -195,8 +176,8 @@ def prepare_to_update(user, zuser, target_perm, zm_types):
             result[zm] = user[ad_attr]
 
     # Check target user type
-    if zuser['type'] != str(target_perm):
-        result['type'] = target_perm
+    if zuser['type'] != str(user['type']):
+        result['type'] = str(user['type'])
 
     # List of Zabbix medias to update
     update_medias = []
@@ -252,7 +233,7 @@ def prepare_to_update(user, zuser, target_perm, zm_types):
     return result
 
 
-def do_prep(value, steps):
+def do_preprocessing(value, steps):
     """
     Preprocessing for values received from LDAP catalog.
 
@@ -288,39 +269,6 @@ def do_prep(value, steps):
     return value
 
 
-def merge_users(users_by_group, merge_by):
-    """
-    Merge given users dicts to stay each user only in one of group.
-    :param users_by_group:
-    Dict {group_name: [{user1}, {user2}, {user3}]}
-    :param merge_by:
-    How to merge users - by minimum privileges level or max.
-    E.g. if user in Zabbix Users and Zabbix Admins at one time, with 'minimum' it will be removed
-    from Zabbix Admins and and vice versa.
-    :return:
-    Dict
-    """
-
-    # Reverse ldap groups with privileges level dict from {k: v} to {v: k}
-    rev_ldap_groups = {int(v): k for k, v in LDAP_GROUPS.items()}
-    # Set privileges level order
-    # TODO: Remove hardcoded values
-    priv = [1, 2, 3] if merge_by == 'minimum' else [3, 2, 1]
-
-    # TODO: Rewrite that fucking bullshit piece of code
-    for user in users_by_group[rev_ldap_groups[priv[0]]]:
-        if user in users_by_group[rev_ldap_groups[priv[1]]]:
-            users_by_group[rev_ldap_groups[priv[1]]].remove(user)
-        if user in users_by_group[rev_ldap_groups[priv[2]]]:
-            users_by_group[rev_ldap_groups[priv[2]]].remove(user)
-
-    for user in users_by_group[rev_ldap_groups[priv[1]]]:
-        if user in users_by_group[rev_ldap_groups[priv[2]]]:
-            users_by_group[rev_ldap_groups[priv[2]]].remove(user)
-
-    return users_by_group
-
-
 if __name__ == '__main__':
     # Read and parse config file
     config = read_config()
@@ -328,7 +276,7 @@ if __name__ == '__main__':
     # Check that config file defines all mandatory sections
     for section in ['main', 'ldap', 'zabbix']:
         if not config.has_section(section):
-            raise SystemExit('CRITICAL: Config file missing "{}" section'.format(section))
+            raise SystemExit(f'CRITICAL: Config file missing "{section}" section')
 
     # Default parameters
     DEF_LDAP_USER_FILTER = "(ObjectClass=Person)(!(UserAccountControl:1.2.840.113556.1.4.803:=2))"
@@ -381,33 +329,29 @@ if __name__ == '__main__':
     # Establish connection with AD server
     ldap_conn = ldap_connect(LDAP_SRV, LDAP_USER, LDAP_PASS)
 
-    # Create a dict with users separated by AD groups
-    ad_users_by_group = {}
-    for group in LDAP_GROUPS.keys():
+    ad_users_result_list = []
+    # temp list to store processed users
+    temp_processed_ad_users = []
+    merge_reverse = True if LDAP_MERGE_PRIVILEGES == 'higher' else False
+    ldap_groups = {k: v for k, v in sorted(LDAP_GROUPS.items(), key=lambda x: x[1], reverse=merge_reverse)}
+    for group in ldap_groups.keys():
         group_dn = get_dn(ldap_conn, 'Group', group)
-        if len(group_dn) > 1:
-            raise SystemExit(f'ERROR: Found more than one groups for name {group}')
         search_filter = f'(&{LDAP_USER_FILTER}(memberOf={group_dn[0]}))'
         ad_users = get_users(ldap_conn, search_filter, LDAP_USER_ATTRS)
-        # if len(ad_users) == 0:
-        #     raise SystemExit(f'ERROR: LDAP query returned 0 users')
         # Empty list to store dicts of users
-        ad_users_list = []
         for ad_user in ad_users:
-            # Empty dict to store user's attr: value pares
-            ad_user_dict = {}
+            # Dict to store user's attr: value pares
+            ad_user_dict = {'type': LDAP_GROUPS[group]}
             for attr in LDAP_USER_ATTRS:
                 raw_attr_value = ad_user[attr].value
+                # Preprocessing
                 if attr in PREP_STEPS.keys() and raw_attr_value is not None:
-                    ad_user_dict[attr] = do_prep(raw_attr_value, PREP_STEPS[attr])
+                    ad_user_dict[attr] = do_preprocessing(raw_attr_value, PREP_STEPS[attr])
                 else:
                     ad_user_dict[attr] = raw_attr_value
-            ad_users_list.append(ad_user_dict)
-        ad_users_by_group[group] = ad_users_list
-
-    # Merge users in all groups to stay them in one instance
-    # TODO: Move merge_by to config
-    merge_users(ad_users_by_group, merge_by=LDAP_MERGE_PRIVILEGES)
+            if ad_user['sAMAccountName'] not in temp_processed_ad_users:
+                ad_users_result_list.append(ad_user_dict)
+            temp_processed_ad_users.append(ad_user['sAMAccountName'])
 
     # Connect to Zabbix API
     zapi = ZabbixAPI(ZBX_API_URL)
@@ -435,51 +379,44 @@ if __name__ == '__main__':
     zbx_users_logins = [zbx_user['alias'] for zbx_user in zbx_users]
 
     # Get list of Zabbix media types set in configuration file
-    # Possible mediatypes:
-    # 0 - email;
-    # 1 - script;
-    # 2 - SMS;
-    # 4 - Webhook.
+    # Possible mediatypes: 0 - email; 1 - script; 2 - SMS; 4 - Webhook.
     media_params = {"filter": {"name": list(ZBX_USER_MEDIA_MAP.keys())}, "output": ["mediatypeid", "name", "type"]}
     zbx_target_medias = zapi.do_request(method="mediatype.get", params=media_params)['result']
     zbx_attr_media_map = {zm['name']: {"mtid": zm['mediatypeid'], "type": zm['type']} for zm in zbx_target_medias}
 
     # Prepare list to store data for ZabbixAPI methods
-    users_to_create = []
-    users_to_update = []
-    for ldap_group, ldap_users in ad_users_by_group.items():
-        for ldap_user in ldap_users:
-            ldap_user_login = ldap_user[LDAP_USER_ID_ATTR]
-            if ldap_user_login not in zbx_users_logins:
-                # Check given users attributes for null values
-                check_result = check_aduser_media(ldap_user)
-                # Create new user if: check return True as 1st element or create_with_empty_media set to True in config
-                if MAIN_CREATE_WITH_EMPTY_MEDIA or check_result[0]:
-                    create_params = prepare_to_create(ldap_user, zbx_group_id, LDAP_GROUPS[ldap_group],
-                                                      zbx_attr_media_map)
-                    users_to_create.append(create_params)
-                else:
-                    print(f'INFO: User {ldap_user_login} has empty attributes: {check_result[1]}. Skipping.')
-            # Update existing user in Zabbix
+    users_create_params = []
+    users_update_params = []
+    for ldap_user in ad_users_result_list:
+        ldap_user_login = ldap_user[LDAP_USER_ID_ATTR]
+        if ldap_user_login not in zbx_users_logins:
+            # Check given users attributes for null values
+            check_result = check_aduser_media(ldap_user)
+            # Create new user if: check return True as 1st element or create_with_empty_media set to True in config
+            if MAIN_CREATE_WITH_EMPTY_MEDIA or check_result[0]:
+                create_params = prepare_to_create(ldap_user, zbx_group_id, zbx_attr_media_map)
+                users_create_params.append(create_params)
             else:
-                for zbx_user in zbx_users:
-                    if zbx_user['alias'] == ldap_user_login:
-                        update_params = prepare_to_update(ldap_user, zbx_user, LDAP_GROUPS[ldap_group],
-                                                          zbx_attr_media_map)
-                        if len(update_params) != 0:
-                            users_to_update.append(update_params)
+                print(f'INFO: User {ldap_user_login} has empty attributes: {check_result[1]}. Skipping.')
+        # Update existing user in Zabbix
+        else:
+            for zbx_user in zbx_users:
+                if zbx_user['alias'] == ldap_user_login:
+                    update_params = prepare_to_update(ldap_user, zbx_user, zbx_attr_media_map)
+                    if len(update_params) != 0:
+                        users_update_params.append(update_params)
 
     # Create users in Zabbix
-    if len(users_to_create) != 0:
-        print(f'DEBUG: create list of users: {users_to_create}')
-        zapi.do_request(method="user.create", params=users_to_create)
+    if len(users_create_params) != 0:
+        print(f'DEBUG: create list of users: {users_create_params}')
+        zapi.do_request(method="user.create", params=users_create_params)
     else:
         print(f'DEBUG: list of users to create is empty. Nothing to do')
 
     # Update users in Zabbix
-    if len(users_to_update) != 0:
-        print(f'DEBUG: update list of users: {users_to_update}')
-        zapi.do_request(method="user.update", params=users_to_update)
+    if len(users_update_params) != 0:
+        print(f'DEBUG: update list of users: {users_update_params}')
+        zapi.do_request(method="user.update", params=users_update_params)
     else:
         print(f'DEBUG: list of users to update is empty. Nothing to do')
 
