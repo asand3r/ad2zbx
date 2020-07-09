@@ -296,7 +296,7 @@ if __name__ == '__main__':
     DEF_LDAP_USER_FILTER = "(ObjectClass=Person)(!(UserAccountControl:1.2.840.113556.1.4.803:=2))"
     DEF_LDAP_USER_ID_ATTR = "sAMAccountName"
     DEF_LDAP_USER_ATTRS = f'{DEF_LDAP_USER_ID_ATTR}, sn, givenName, mobile, mail'
-    DEF_LDAP_MERGE_PRIVILEGES = 'minimum'
+    DEF_LDAP_MERGE_PRIVILEGES = 'lower'
     DEF_MAIN_DISABLE_MISSING = False
     DEF_MAIN_CREATE_WITH_EMPTY_MEDIA = False
     DEF_ZBX_USER_ATTR_MAP = {"alias": DEF_LDAP_USER_ID_ATTR, "name": "givenName", "surname": "sn"}
