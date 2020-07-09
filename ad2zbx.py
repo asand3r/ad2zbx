@@ -188,7 +188,7 @@ def prepare_to_update(user, zuser, zm_types):
             if user[attr[0]] is not None:
                 zm_mtid = zm_types[zm]['mtid']
                 # TODO: Rewrite zm_sendto
-                zm_sendto = [user[attr]] if zm_types[zm]['type'] == '0' else user[attr]
+                zm_sendto = [user[attr[0]]] if zm_types[zm]['type'] == '0' else user[attr[0]]
                 zm_severity = ZBX_USER_MEDIA_MAP[zm][1]
                 media = {"mediatypeid": zm_mtid, "sendto": zm_sendto, "severity": zm_severity}
                 update_medias.append(media)
