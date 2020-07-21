@@ -2,7 +2,7 @@
 Script to import users from Microsoft Active Directory groups to Zabbix Monitoring system.
 
 ## Current version
-0.1alpha
+0.1alpha2
 
 ## Dependencies
 - pyzabbix
@@ -11,3 +11,10 @@ Script to import users from Microsoft Active Directory groups to Zabbix Monitori
 ## Features
 - Create new users from given list of Active Directory groups
 - Update existing users from Active Directory
+- LDAP attributes preprocessing
+  - replace
+  - remove_spaces
+  - to_lower
+  - to_upper
+  - add_suffix
+  - add_prefix
