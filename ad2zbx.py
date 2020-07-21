@@ -9,7 +9,7 @@ from pyzabbix import ZabbixAPI
 from ldap3.core.exceptions import LDAPSocketOpenError
 
 
-def read_config(path='ad2zbx.conf'):
+def read_config(path='./ad2zbx.conf'):
     """
     Read ad2zbx.conf config file.
 
@@ -273,13 +273,16 @@ def do_preprocessing(value, steps):
 
 if __name__ == '__main__':
 
-    VERSION = '0.1alpha1'
+    VERSION = '0.1alpha2'
 
     # Parsing CLI arguments
     main_parser = ArgumentParser(description='Script to import users from LDAP to Zabbix', add_help=True)
     main_parser.add_argument('-d', '--dry-run', action='store_true', help='Do not make any changes, just prepare data')
     main_parser.add_argument('--debug', action='store_true', help='Enable debug messages')
+    main_parser.add_argument('-c', '--config', type=str, default='./ad2zbx.conf', help='Path to configuration file')
+    main_parser.add_argument('-v', '--version', action='version', version=VERSION)
     args = main_parser.parse_args()
+
     # Set const from CLI params
     DEBUG = True if args.debug else False
     DRY_RUN = True if args.dry_run else False
@@ -287,15 +290,20 @@ if __name__ == '__main__':
     # Read and parse config file
     config = read_config()
 
-    # Check that config file defines all mandatory sections
-    for section in ['main', 'ldap', 'zabbix']:
+    # Check all mandatory config file sections and options
+    mandatory_options = {'ldap': ('ldap_user', 'ldap_pass', 'ldap_server', 'group_names_map'),
+                         'zabbix': ('zbx_api_url', 'zbx_user', 'zbx_pass', 'zbx_group_name')}
+    for section, options in mandatory_options.items():
         if not config.has_section(section):
-            raise SystemExit(f'CRITICAL: Config file missing "{section}" section')
+            raise SystemExit(f'CRITICAL: Config file miss "{section}" section')
+        for option in options:
+            if not config.has_option(section, option):
+                raise SystemExit(f'CRITICAL: Config file miss "{option}" option in "ldap" section')
 
     # Default parameters
-    DEF_LDAP_USER_FILTER = "(ObjectClass=Person)(!(UserAccountControl:1.2.840.113556.1.4.803:=2))"
-    DEF_LDAP_USER_ID_ATTR = "sAMAccountName"
-    DEF_LDAP_USER_ATTRS = f'{DEF_LDAP_USER_ID_ATTR}, sn, givenName, mobile, mail'
+    DEF_LDAP_USER_FILTER = '(ObjectClass=Person)(!(UserAccountControl:1.2.840.113556.1.4.803:=2))'
+    DEF_LDAP_USER_ID_ATTR = 'sAMAccountName'
+    DEF_LDAP_USER_ATTRS = 'sn, givenName, mobile, mail'
     DEF_LDAP_MERGE_PRIVILEGES = 'lower'
     DEF_MAIN_DISABLE_MISSING = False
     DEF_MAIN_CREATE_WITH_EMPTY_MEDIA = False
@@ -316,10 +324,9 @@ if __name__ == '__main__':
     LDAP_MERGE_PRIVILEGES = config.get('ldap', 'merge_privileges', fallback=DEF_LDAP_MERGE_PRIVILEGES)
     LDAP_USER_FILTER = config.get('ldap', 'ldap_user_filter', fallback=DEF_LDAP_USER_FILTER)
     LDAP_USER_ID_ATTR = config.get('ldap', 'ldap_user_id_attr', fallback=DEF_LDAP_USER_ID_ATTR)
-    # TODO: May it be written better?
-    LDAP_USER_ATTRS = [attr for attr in config.get('ldap', 'ldap_user_attrs',
-                                                   fallback=DEF_LDAP_USER_ATTRS).replace(" ", "").split(",")]
-    LDAP_USER_ATTRS = set([LDAP_USER_ID_ATTR] + LDAP_USER_ATTRS)
+    LDAP_USER_ATTRS = [attr.strip() for attr in config.get('ldap', 'ldap_user_attrs',
+                                                           fallback=DEF_LDAP_USER_ATTRS).split(",")]
+    LDAP_USER_ATTRS.append(LDAP_USER_ID_ATTR)
 
     # zabbix section
     ZBX_API_URL = config.get('zabbix', 'zbx_api_url')
@@ -342,31 +349,31 @@ if __name__ == '__main__':
 
     # Establish connection with AD server
     ldap_conn = ldap_connect(LDAP_SRV, LDAP_USER, LDAP_PASS)
-    ad_users_result_list = []
+    ldap_users_result_list = []
     # temp list to store processed users
-    temp_processed_ad_users = []
+    temp_processed_ldap_users = []
     merge_reverse = True if LDAP_MERGE_PRIVILEGES == 'higher' else False
     ldap_groups = {k: v for k, v in sorted(LDAP_GROUPS.items(), key=lambda x: x[1], reverse=merge_reverse)}
     for group in ldap_groups.keys():
         group_dn = get_dn(ldap_conn, 'Group', group)
         search_filter = f'(&{LDAP_USER_FILTER}(memberOf={group_dn[0]}))'
-        ad_users = get_users(ldap_conn, search_filter, LDAP_USER_ATTRS)
+        ldap_users = get_users(ldap_conn, search_filter, LDAP_USER_ATTRS)
         # Empty list to store dicts of users
-        for ad_user in ad_users:
+        for ldap_user in ldap_users:
             # Dict to store user's attr: value pares
             ad_user_dict = {'type': LDAP_GROUPS[group]}
             for attr in LDAP_USER_ATTRS:
-                raw_attr_value = ad_user[attr].value
+                raw_attr_value = ldap_user[attr].value
                 # Preprocessing
                 if attr in PREP_STEPS.keys() and raw_attr_value is not None:
                     ad_user_dict[attr] = do_preprocessing(raw_attr_value, PREP_STEPS[attr])
                 else:
                     ad_user_dict[attr] = raw_attr_value
-            if ad_user['sAMAccountName'] not in temp_processed_ad_users:
-                ad_users_result_list.append(ad_user_dict)
-            temp_processed_ad_users.append(ad_user['sAMAccountName'])
+            if ldap_user['sAMAccountName'] not in temp_processed_ldap_users:
+                ldap_users_result_list.append(ad_user_dict)
+            temp_processed_ldap_users.append(ldap_user['sAMAccountName'])
     if DEBUG:
-        print(f'DEBUG: Received {len(ad_users_result_list)} users from LDAP')
+        print(f'DEBUG: Received {len(ldap_users_result_list)} users from LDAP')
     # Connect to Zabbix API
     zapi = ZabbixAPI(ZBX_API_URL)
     zapi.session.verify = ZBX_API_VERIFY_SSL
@@ -388,12 +395,10 @@ if __name__ == '__main__':
     else:
         raise SystemExit(f'ERROR: Cannot find group "{ZBX_GROUP}" in Zabbix.')
 
-    # Get users of target Zabbix group
-    # TODO: Retrieve all users or only belongs to target group: "usrgrpids": [zbx_group_id]
-    user_get_params = {"selectMedias": "extend", "output": list(ZBX_USER_ATTR_MAP.keys()) + ["type"]}
-    zbx_users = zapi.do_request(method="user.get", params=user_get_params)['result']
-    # Create a list just of Zabbix user logins
-    zbx_users_logins = [zbx_user['alias'] for zbx_user in zbx_users]
+    # Get all Zabbix users with Zabbix API
+    user_get_params = {"selectMedias": "extend", "output": list(ZBX_USER_ATTR_MAP.keys()) + ['type']}
+    zbx_users = {zu['alias']: zu for zu in zapi.do_request(method="user.get", params=user_get_params)['result']}
+    zbx_users_logins = [zbx_user for zbx_user in zbx_users.keys()]
     if DEBUG:
         print(f'DEBUG: Received {len(zbx_users_logins)} users from Zabbix')
 
@@ -411,10 +416,10 @@ if __name__ == '__main__':
         print(f'DEBUG: Start to process LDAP users list')
     users_create_params = []
     users_update_params = []
-    for ldap_user in ad_users_result_list:
+    for ldap_user in ldap_users_result_list:
         ldap_user_login = ldap_user[LDAP_USER_ID_ATTR]
         if DEBUG:
-            print(f'DEBUG: Check user {ldap_user_login}')
+            print(f'DEBUG: Checking user {ldap_user_login}')
         if ldap_user_login not in zbx_users_logins:
             if DEBUG:
                 print(f'DEBUG: - User {ldap_user_login} not found in Zabbix and must be created.')
@@ -430,35 +435,32 @@ if __name__ == '__main__':
         else:
             if DEBUG:
                 print(f'DEBUG: - User {ldap_user_login} found in Zabbix. Checking necessity to be updated')
-            for zbx_user in zbx_users:
-                if zbx_user['alias'] == ldap_user_login:
-                    update_params = prepare_to_update(ldap_user, zbx_user, zbx_attr_media_map)
-                    if len(update_params) != 0:
-                        if DEBUG:
-                            print(f'DEBUG: - User {ldap_user_login} must be updated in Zabbix: {update_params}')
-                        users_update_params.append(update_params)
-                    else:
-                        if DEBUG:
-                            print(f'DEBUG: - User {ldap_user_login} must not be updated in Zabbix')
+            zbx_user = zbx_users[ldap_user_login]
+            update_params = prepare_to_update(ldap_user, zbx_user, zbx_attr_media_map)
+            if len(update_params) != 0:
+                if DEBUG:
+                    print(f'DEBUG: - User {ldap_user_login} must be updated in Zabbix: {update_params}')
+                users_update_params.append(update_params)
+            else:
+                if DEBUG:
+                    print(f'DEBUG: - User {ldap_user_login} must not be updated in Zabbix')
 
     # Create users in Zabbix
     if len(users_create_params) != 0:
-        if args.dry_run is True:
-            if DEBUG:
-                print(f'DEBUG: create list of users: {users_create_params}')
+        if DRY_RUN:
+            print(f'Users to create: {users_create_params}')
         else:
-            print(f'DEBUG: create list of users: {users_create_params}')
+            print(f'Users to create: {users_create_params}')
             zapi.do_request(method='user.create', params=users_create_params)
     else:
         print(f'INFO: List of users to create is empty. Nothing to do')
 
     # Update users in Zabbix
     if len(users_update_params) != 0:
-        if args.dry_run is True:
-            if DEBUG:
-                print(f'DEBUG: update list of users: {users_update_params}')
+        if DRY_RUN is True:
+            print(f'Users to update: {users_update_params}')
         else:
-            print(f'DEBUG: update list of users: {users_update_params}')
+            print(f'Users to update: {users_update_params}')
             zapi.do_request(method='user.update', params=users_update_params)
     else:
         print(f'INFO: List of users to update is empty. Nothing to do')
