@@ -2,7 +2,7 @@
 Script to import users from Microsoft Active Directory groups to Zabbix Monitoring system.
 
 ## Current version
-0.1alpha2
+0.1alpha3
 
 ## Dependencies
 - pyzabbix
