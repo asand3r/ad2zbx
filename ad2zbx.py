@@ -10,6 +10,21 @@ from pyzabbix import ZabbixAPI
 from ldap3.core.exceptions import LDAPSocketOpenError, LDAPBindError
 
 
+class Person:
+    def __init__(self, login, sn, name, privileges=0, media={}):
+        self.login = login
+        self.sn = sn
+        self.name = name
+        self.privileges = privileges
+        self.media = media
+
+    def __repr__(self):
+        return self.login
+
+    def __str__(self):
+        return f'User: {self.login}, {self.sn} {self.name}'
+
+
 def read_config(path='./ad2zbx.conf'):
     """
     Read ad2zbx.conf config file.
