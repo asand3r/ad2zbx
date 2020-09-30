@@ -3,6 +3,7 @@
 import os
 import ldap3
 import logging
+from hashlib import sha256
 from argparse import ArgumentParser
 from configparser import RawConfigParser, NoOptionError
 
@@ -11,7 +12,7 @@ from ldap3.core.exceptions import LDAPSocketOpenError, LDAPBindError
 
 
 class Person:
-    def __init__(self, login, sn, name, privileges=0, media={}):
+    def __init__(self, login, sn, name, privileges=1, media=None):
         self.login = login
         self.sn = sn
         self.name = name
@@ -22,7 +23,20 @@ class Person:
         return self.login
 
     def __str__(self):
-        return f'User: {self.login}, {self.sn} {self.name}'
+        zabbix_roles = {1: 'Zabbix Users', 2: 'Zabbix Admins', 3: 'Zabbix Super Admins'}
+        person = f"Login: {self.login}\nSurname: {self.sn}\nName: {self.name}\n" \
+                 f"Privileges: {zabbix_roles[self.privileges]} ({self.privileges})"
+        return person
+
+    def __eq__(self, other):
+        return True if self.__hash__() == other.__hash__() else False
+
+    def __ne__(self, other):
+        return not self.__eq__(other)
+
+    def __hash__(self):
+        concat = ''.join([self.login, self.sn, self.name]).encode()
+        return sha256(concat).hexdigest()
 
 
 def read_config(path='./ad2zbx.conf'):
