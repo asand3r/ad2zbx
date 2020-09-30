@@ -3,7 +3,6 @@
 import os
 import ldap3
 import logging
-from hashlib import sha256
 from argparse import ArgumentParser
 from configparser import RawConfigParser, NoOptionError
 
@@ -23,7 +22,7 @@ class Person:
         return self.login
 
     def __str__(self):
-        zabbix_roles = {1: 'Zabbix Users', 2: 'Zabbix Admins', 3: 'Zabbix Super Admins'}
+        zabbix_roles = {1: 'Zabbix User', 2: 'Zabbix Admin', 3: 'Zabbix Super Admin'}
         person = f"Login: {self.login}\nSurname: {self.sn}\nName: {self.name}\n" \
                  f"Privileges: {zabbix_roles[self.privileges]} ({self.privileges})"
         return person
@@ -35,8 +34,7 @@ class Person:
         return not self.__eq__(other)
 
     def __hash__(self):
-        concat = ''.join([self.login, self.sn, self.name]).encode()
-        return sha256(concat).hexdigest()
+        return hash((self.login, self.sn, self.name, tuple((m for m in self.media))))
 
 
 def read_config(path='./ad2zbx.conf'):
