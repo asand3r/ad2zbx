@@ -10,27 +10,6 @@ from pyzabbix import ZabbixAPI
 from ldap3.core.exceptions import LDAPSocketOpenError, LDAPBindError
 
 
-def read_config(path='./ad2zbx.conf'):
-    """
-    Read ad2zbx.conf config file.
-
-    :param path:
-    Path to the config file.
-    :return:
-    configparser.RawConfigParser object.
-    """
-
-    cfg = RawConfigParser()
-    if os.path.exists(path):
-        cfg.read(path)
-        return cfg
-    else:
-        # Creating 'startup_error.log' if config file cannot be open
-        with open('startup_error.log', 'w') as err_file:
-            err_file.write(f'ERROR: Cannot find "{path}" in current directory.')
-            raise SystemExit(f'Missing config file ({path}) in current directory')
-
-
 def ldap_connect(ldap_server, bind_user, bind_password):
     """
     Establishing connection with LDAP server.
@@ -223,7 +202,7 @@ def prepare_to_update(user, zuser, zm_types):
     return result
 
 
-def prepr_exec(user, value, steps):
+def prep_exec(user, value, steps):
     """
     Preprocessing for values received from LDAP catalog.
 
@@ -291,43 +270,49 @@ if __name__ == '__main__':
 
     # Parsing CLI arguments
     main_parser = ArgumentParser(description='Script to import users from LDAP to Zabbix', add_help=True)
-    main_parser.add_argument('-d', '--dry-run', action='store_true', help='Do not make any changes, just prepare data')
+    main_parser.add_argument('-d', '--dry-run', action='store_true', help='Do not make any changes')
     main_parser.add_argument('-c', '--config', type=str, default='./ad2zbx.conf', help='Path to configuration file')
     main_parser.add_argument('-v', '--version', action='version', version=VERSION)
+    main_parser.add_argument('-l', '--console-log-level', type=str, default='INFO', help='Console log level')
     args = main_parser.parse_args()
 
-    # Set const from CLI params
-    DRY_RUN = True if args.dry_run else False
+    # Set console logger
+    logger = logging.getLogger('ad2zbx')
+    logger.setLevel(args.console_log_level)
+    console_formatter = logging.Formatter('%(asctime)s: %(levelname)s: %(message)s')
+    console_handler = logging.StreamHandler()
+    console_handler.setLevel(args.console_log_level)
+    console_handler.setFormatter(console_formatter)
+    logger.addHandler(console_handler)
 
     # Read and parse config file
-    config = read_config()
+    logger.debug(f'Read config file')
+    config = RawConfigParser()
+    try:
+        with open(args.config) as cfg:
+            config.read_file(cfg)
+    except FileNotFoundError:
+        raise SystemExit(f'Cannot read config file "{args.config}"')
 
     # logging
-    LOG_FILE = config.get('logging', 'log_file', fallback='ad2zbx.log')
+    LOG_FILE = config.get('logging', 'log_file', fallback='/tmp/ad2zbx.log')
     LOG_LEVEL = config.get('logging', 'log_level', fallback='WARNING')
 
-    # Set logger
-    logger = logging.getLogger('ad2zbx')
+    # Set file logger setting
+    logger.debug(f'Creating file logger. Writes messages to {LOG_FILE} starting with {LOG_LEVEL} level')
     logger.setLevel(LOG_LEVEL)
-
-    # Formatters
-    console_formatter = logging.Formatter('%(asctime)s: %(levelname)s: %(message)s')
     file_formatter = logging.Formatter('%(asctime)s: %(levelname)s: %(message)s')
-
-    # Handlers
-    console_handler = logging.StreamHandler()
-    console_handler.setLevel('DEBUG')
-    console_handler.setFormatter(console_formatter)
     file_handler = logging.FileHandler(LOG_FILE)
     file_handler.setLevel(LOG_LEVEL)
     file_handler.setFormatter(file_formatter)
-
-    # Add handlers to logger
-    logger.addHandler(console_handler)
     logger.addHandler(file_handler)
 
+    # Set const from CLI params
+    DRY_RUN = True if args.dry_run else False
+    if DRY_RUN:
+        logger.debug(f'Running in test mode. No data will change.')
     # Check all mandatory config file sections and options
-    mandatory_options = {'ldap': ('ldap_user', 'ldap_server', 'group_names_map'),
+    mandatory_options = {'ldap': ('ldap_server', 'ldap_user', 'group_names_map'),
                          'zabbix': ('zbx_api_url', 'zbx_user', 'zbx_group_name')}
     for section, options in mandatory_options.items():
         if not config.has_section(section):
@@ -412,9 +397,8 @@ if __name__ == '__main__':
                 raw_attr_value = ldap_user[attr].value
                 # Preprocessing
                 if attr in PREP_STEPS.keys() and raw_attr_value is not None:
-                    ad_user_dict[attr] = prepr_exec(ldap_user['sAMAccountName'], raw_attr_value, PREP_STEPS[attr])
+                    ad_user_dict[attr] = prep_exec(ldap_user['sAMAccountName'], raw_attr_value, PREP_STEPS[attr])
                 else:
-                    logger.debug(f'{attr} not in {PREP_STEPS.keys()}')
                     ad_user_dict[attr] = raw_attr_value
             if ldap_user['sAMAccountName'] not in temp_processed_ldap_users:
                 ldap_users_result_list.append(ad_user_dict)
@@ -467,8 +451,7 @@ if __name__ == '__main__':
             check_result = check_aduser_media(ldap_user)
             # Create new user if: check return True as 1st element or create_with_empty_media set to True in config
             if MAIN_CREATE_WITH_EMPTY_MEDIA or check_result[0]:
-                logger.info(f'Creating user {ldap_user}')
-                logger.debug(f'Zabbix group ID: {zbx_group_id}, ')
+                logger.info(f'User must be created {ldap_user}')
                 create_params = prepare_to_create(ldap_user, zbx_group_id, zbx_attr_media_map)
                 users_create_params.append(create_params)
             else:
@@ -485,22 +468,16 @@ if __name__ == '__main__':
                 logger.debug(f'User {ldap_user_login} is up to date')
 
     # Create users in Zabbix
-    if len(users_create_params) != 0:
-        logger.debug(f'List of users to create: {users_create_params}')
-        if not DRY_RUN:
-            logger.info(f'Creating {len(users_create_params)} users')
-            zapi.do_request(method='user.create', params=users_create_params)
-    else:
-        logger.info(f'List of users to create is empty. Nothing to do')
+    logger.info(f'Number of users to create: {len(users_create_params)}')
+    logger.debug(f'List of users to create: {users_create_params}')
+    if not DRY_RUN:
+        zapi.do_request(method='user.create', params=users_create_params)
 
     # Update users in Zabbix
-    if len(users_update_params) != 0:
-        logger.debug(f'List of users to update: {users_update_params}')
-        if not DRY_RUN:
-            logger.info(f'Updating {len(users_update_params)} users')
-            zapi.do_request(method='user.update', params=users_update_params)
-    else:
-        logger.info(f'INFO: List of users to update is empty. Nothing to do')
+    logger.info(f'Number of users to update: {len(users_update_params)}')
+    logger.debug(f'List of users to update: {users_update_params}')
+    if not DRY_RUN:
+        zapi.do_request(method='user.update', params=users_update_params)
 
     # Logout from Zabbix and LDAP
     logger.debug(f'Logout from Zabbix API')
