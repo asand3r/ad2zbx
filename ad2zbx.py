@@ -40,15 +40,10 @@ class Person:
 def ldap_connect(ldap_server, bind_user, bind_password):
     """
     Establishing connection with LDAP server.
-
-    :param ldap_server:
-    str() LDAP server name or IP address.
-    :param bind_user:
-    str() Username (sAMAccountName) using to connect with NTLM.
-    :param bind_password:
-    str() User password.
-    :return:
-    ldap3.Connection object.
+    :param ldap_server: str() LDAP server name or IP address.
+    :param bind_user: str() Username (sAMAccountName) using to connect with NTLM.
+    :param bind_password: str() User password.
+    :return: ldap3.Connection object.
     """
 
     srv = ldap3.Server(ldap_server, get_info='ALL', mode='IP_V4_PREFERRED', use_ssl=LDAP_SSL)
@@ -66,15 +61,10 @@ def ldap_connect(ldap_server, bind_user, bind_password):
 def get_users(conn, searchfilter, attrs):
     """
     Search users in catalog using searchfilter and return it with given attributes.
-
-    :param conn:
-    ldap3.Connection object.
-    :param searchfilter:
-    LDAP search filter from config file.
-    :param attrs:
-    List of attributes to get from catalog.
-    :return:
-    dict with all found objects.
+    :param conn: ldap3.Connection object.
+    :param searchfilter: LDAP search filter from config file.
+    :param attrs: List of attributes to get from catalog.
+    :return: dict with all found objects.
     """
 
     base_dn = conn.server.info.other['DefaultNamingContext'][0]
@@ -85,7 +75,6 @@ def get_users(conn, searchfilter, attrs):
 def get_dn(conn, object_class, property_value, property_name='sAMAccountName'):
     """
     Get DN of given object name.
-
     :param conn: ldap3.Connection object.
     :param object_class: Class of searchable object (user, group, person etc)
     :param property_name: Name of searchable object. sAMAccountName in general.
@@ -104,7 +93,6 @@ def get_dn(conn, object_class, property_value, property_name='sAMAccountName'):
 def check_aduser_media(user):
     """
     Check AD user media attributes to have a not-null value.
-
     :param user: Dict with user's attributes.
     :return: Two element list of: Bool, empty_attrs
     """
@@ -123,7 +111,6 @@ def check_aduser_media(user):
 def prepare_to_create(user, gid, zm_types):
     """
     Prepare dict from ldap3 to JSON document for Zabbix API.
-
     :param user: Dict with user's attributes from 'entry_attributes_as_dict' ldap3 method
     :param gid: User group ID
     :param zm_types: Dict with mediatype ID and type
@@ -156,7 +143,6 @@ def prepare_to_create(user, gid, zm_types):
 def prepare_to_update(user, zuser, zm_types):
     """
     Prepare JSON object to update existing users in Zabbix.
-
     :param user: Dict with AD user
     :param zuser: Dict with Zabbix user
     :param zm_types: Dict with Zabbix medias
@@ -270,7 +256,7 @@ def prep_exec(user, value, steps):
     return value
 
 
-def get_config_parameter(env_var, conf_section, conf_option):
+def get_env_or_conf(env_var, conf_section, conf_option):
     """
     Read environment variable or config parameter as fallback.
     :param env_var: environment variable name
@@ -305,10 +291,10 @@ if __name__ == '__main__':
 
     # Set console logger
     logger = logging.getLogger('ad2zbx')
-    logger.setLevel(args.console_log_level)
+    logger.setLevel(args.console_log_level.upper())
     console_formatter = logging.Formatter('%(asctime)s: %(levelname)s: %(message)s')
     console_handler = logging.StreamHandler()
-    console_handler.setLevel(args.console_log_level)
+    console_handler.setLevel(args.console_log_level.upper())
     console_handler.setFormatter(console_formatter)
     logger.addHandler(console_handler)
 
@@ -367,7 +353,7 @@ if __name__ == '__main__':
     # ldap section
     LDAP_SRV = config.get('ldap', 'ldap_server')
     LDAP_USER = config.get('ldap', 'ldap_user')
-    LDAP_PASS = get_config_parameter('AD2ZBX_LDAP_PASS', 'ldap', 'ldap_pass')
+    LDAP_PASS = get_env_or_conf('AD2ZBX_LDAP_PASS', 'ldap', 'ldap_pass')
     LDAP_SSL = config.getboolean('ldap', 'use_ssl', fallback=False)
     LDAP_GROUPS = eval(config.get('ldap', 'group_names_map'))
     LDAP_MERGE_PRIVILEGES = config.get('ldap', 'merge_privileges', fallback=DEF_LDAP_MERGE_PRIVILEGES)
@@ -382,7 +368,7 @@ if __name__ == '__main__':
     ZBX_API_URL = config.get('zabbix', 'zbx_api_url')
     ZBX_API_VERIFY_SSL = config.get('zabbix', 'verify_ssl', fallback=DEF_ZBX_API_VERIFY_SSL)
     ZBX_USER = config.get('zabbix', 'zbx_user')
-    ZBX_PASS = get_config_parameter('AD2ZBX_ZBX_PASS', 'zabbix', 'zbx_pass')
+    ZBX_PASS = get_env_or_conf('AD2ZBX_ZBX_PASS', 'zabbix', 'zbx_pass')
     ZBX_TARGET_GROUP = config.get('zabbix', 'zbx_group_name')
     ZBX_USER_MEDIA_MAP = eval(config.get('zabbix', 'zbx_user_media_map', fallback=DEF_ZBX_USER_MEDIA_MAP))
     ZBX_USER_ATTR_MAP = eval(config.get('zabbix', 'zbx_user_attr_map', fallback=DEF_ZBX_USER_ATTR_MAP))
