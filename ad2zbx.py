@@ -10,6 +10,33 @@ from pyzabbix import ZabbixAPI
 from ldap3.core.exceptions import LDAPSocketOpenError, LDAPBindError
 
 
+class Person:
+    def __init__(self, login, sn, name, privileges=1, media=None):
+        self.login = login
+        self.sn = sn
+        self.name = name
+        self.privileges = privileges
+        self.media = media
+
+    def __repr__(self):
+        return self.login
+
+    def __str__(self):
+        zabbix_roles = {1: 'Zabbix User', 2: 'Zabbix Admin', 3: 'Zabbix Super Admin'}
+        person = f"Login: {self.login}\nSurname: {self.sn}\nName: {self.name}\n" \
+                 f"Privileges: {zabbix_roles[self.privileges]} ({self.privileges})"
+        return person
+
+    def __eq__(self, other):
+        return True if self.__hash__() == other.__hash__() else False
+
+    def __ne__(self, other):
+        return not self.__eq__(other)
+
+    def __hash__(self):
+        return hash((self.login, self.sn, self.name, tuple((m for m in self.media))))
+
+
 def ldap_connect(ldap_server, bind_user, bind_password):
     """
     Establishing connection with LDAP server.
