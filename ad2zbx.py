@@ -168,7 +168,11 @@ def prepare_to_update(user, zuser, zm_types):
     if len(zuser['medias']) == 0:
         for zm, attr in ZBX_USER_MEDIA_MAP.items():
             if user[attr[0]] is not None:
-                zm_mtid = zm_types[zm]['mtid']
+                try:
+                    zm_mtid = zm_types[zm]['mtid']
+                except KeyError:
+                    logger.critical(f'Media type "{zm}" not found. Check "zbx_user_media_map" config parameter')
+                    raise SystemExit(1)
                 # TODO: Rewrite zm_sendto
                 zm_sendto = [user[attr[0]]] if zm_types[zm]['type'] == '0' else user[attr[0]]
                 zm_severity = ZBX_USER_MEDIA_MAP[zm][1]
@@ -179,39 +183,59 @@ def prepare_to_update(user, zuser, zm_types):
         # Current Zabbix User media list
         zbx_user_media_list = [{"mediatypeid": media['mediatypeid'],
                                 "sendto": media['sendto'], "severity": media['severity']} for media in zuser['medias']]
-        # AD user media list
+        # LDAP user media list
         ldap_user_media_list = []
         for zm, attr in ZBX_USER_MEDIA_MAP.items():
             # Do not compare with empty AD attribute
             if user[attr[0]] is not None:
-                # TODO: Key error for non-present media
-                zm_mtid = zm_types[zm]['mtid']
-                # TODO: Rewrite zm_sendto
+                try:
+                    zm_mtid = zm_types[zm]['mtid']
+                except KeyError:
+                    logger.critical(f'Media type "{zm}" not found. Check "zbx_user_media_map" config parameter')
+                    raise SystemExit(1)
                 zm_sendto = [user[attr[0]]] if zm_types[zm]['type'] == '0' else user[attr[0]]
                 zm_severity = ZBX_USER_MEDIA_MAP[zm][1]
                 ldap_user_media_list.append({"mediatypeid": zm_mtid, "sendto": zm_sendto, "severity": zm_severity})
         # Sorting AD and ZBX media lists to simple compare it
         sorted_ldap_user_media_list = sorted(ldap_user_media_list, key=lambda k: k['mediatypeid'])
+        logger.debug(f'LDAP User {user["sAMAccountName"]} media list: {sorted_ldap_user_media_list}')
         sorted_zbx_user_media_list = sorted(zbx_user_media_list, key=lambda k: k['mediatypeid'])
+        logger.debug(f'Zabbix User {zuser["alias"]} media list: {sorted_zbx_user_media_list}')
         if sorted_ldap_user_media_list != sorted_zbx_user_media_list:
-            for ldap_media in ldap_user_media_list:
-                ldap_media_id, ldap_media_sendto, ldap_media_severity = ldap_media.values()
-                for zbx_media in zbx_user_media_list:
-                    if ldap_media_id in [zm['mediatypeid'] for zm in zbx_user_media_list]:
-                        zbx_media_id, zbx_media_sendto, zbx_media_severity = zbx_media.values()
-                        if zbx_media_id == ldap_media_id:
-                            if ldap_media_sendto == zbx_media_sendto and ldap_media_severity == zbx_media_severity:
-                                update_medias.append(zbx_media)
-                            else:
-                                update_medias.append(ldap_media)
+            logger.debug(f'Update existing user\'s media list')
+            for zbx_media in zbx_user_media_list:
+                logger.debug(f'Checking Zabbix media {zbx_media}')
+                zm_id, zm_sendto, zm_severity = zbx_media.values()
+                lm_ids = {lm['mediatypeid']: lm for lm in ldap_user_media_list}
+                if zm_id in lm_ids.keys():
+                    logger.debug(f'Zabbix media {zbx_media} in ldap media list')
+                    ldap_media = lm_ids[zm_id]
+                    lm_id, lm_sendto, lm_severity = ldap_media.values()
+                    logger.debug(f'Compare Zabbix media: {zbx_media} with LDAP media: {ldap_media}')
+                    if lm_sendto == zm_sendto and lm_severity == zm_severity:
+                        logger.debug(f'All props are equal. Append {zbx_media} to result')
+                        update_medias.append(zbx_media)
                     else:
+                        logger.debug(f'Props are differ. Append {ldap_media} to result')
                         update_medias.append(ldap_media)
+                else:
+                    logger.debug(f'Zabbix media {zbx_media} not in ldap media list. Append it to result')
+                    update_medias.append(zbx_media)
+            logger.debug(f'Create missing user\'s medias from LDAP')
+            for ldap_media in ldap_user_media_list:
+                logger.debug(f'Checking LDAP media: {ldap_media}')
+                if ldap_media not in update_medias:
+                    logger.debug(f'LDAP media {ldap_media} is missing. Append it.')
+                    update_medias.append(ldap_media)
+
         # Append list with medias to result dict
-        if len(update_medias) != 0:
+        if len(update_medias) != 0 and update_medias != zbx_user_media_list:
+            logger.debug(f'Total update media list: {update_medias}')
             result['user_medias'] = update_medias
     # Add user id to result dict
     if len(result) != 0:
         result['userid'] = zuser['userid']
+        result['user_medias'] = update_medias
     return result
 
 
@@ -343,7 +367,7 @@ if __name__ == '__main__':
     DEF_MAIN_DISABLE_MISSING = False
     DEF_MAIN_CREATE_WITH_EMPTY_MEDIA = False
     DEF_ZBX_USER_ATTR_MAP = {"alias": DEF_LDAP_USER_ID_ATTR, "name": "givenName", "surname": "sn"}
-    DEF_ZBX_USER_MEDIA_MAP = {"Email": ["mail", 60], "SMS": ["mobile", 48]}
+    DEF_ZBX_USER_MEDIA_MAP = '{"Email": ["mail", 60], "SMS": ["mobile", 48]}'
     DEF_ZBX_API_VERIFY_SSL = False
 
     # main section
@@ -449,7 +473,7 @@ if __name__ == '__main__':
     zbx_target_medias = zapi.do_request(method="mediatype.get", params=mt_get_params)['result']
     zbx_attr_media_map = {zm['name']: {"mtid": zm['mediatypeid'], "type": zm['type']} for zm in zbx_target_medias}
     logger.debug(f'Received mediatypes: {zbx_target_medias}')
-    logger.debug(f'Form mediatype to LDAP attr map: {zbx_attr_media_map}')
+    logger.debug(f'Formed mediatype to LDAP attr map: {zbx_attr_media_map}')
 
     # Prepare list to store data for ZabbixAPI methods
     logger.debug(f'Start to process LDAP users list')
@@ -474,9 +498,11 @@ if __name__ == '__main__':
             logger.debug(f'User {ldap_user_login} found in Zabbix. Checking the need for an update')
             zbx_user = zbx_users[ldap_user_login]
             update_params = prepare_to_update(ldap_user, zbx_user, zbx_attr_media_map)
-            if len(update_params) != 0:
-                logger.debug(f'User {ldap_user_login} must be updated in Zabbix with params: {update_params}')
-                users_update_params.append(update_params)
+            # TODO: Rewrite! Very stupid. Related to 244-251 lines in prepare_to_update
+            if 'user_medias' in update_params:
+                if len(update_params['user_medias']) != 0:
+                    logger.debug(f'User {ldap_user_login} must be updated in Zabbix with params: {update_params}')
+                    users_update_params.append(update_params)
             else:
                 logger.debug(f'User {ldap_user_login} is up to date')
 
@@ -484,13 +510,17 @@ if __name__ == '__main__':
     logger.info(f'Number of users to create: {len(users_create_params)}')
     logger.debug(f'List of users to create: {users_create_params}')
     if not DRY_RUN:
-        zapi.do_request(method='user.create', params=users_create_params)
+        if len(users_create_params) > 0:
+            logger.info(f'Executing "user.create" API method')
+            zapi.do_request(method='user.create', params=users_create_params)
 
     # Update users in Zabbix
     logger.info(f'Number of users to update: {len(users_update_params)}')
     logger.debug(f'List of users to update: {users_update_params}')
     if not DRY_RUN:
-        zapi.do_request(method='user.update', params=users_update_params)
+        if len(users_update_params) > 0:
+            logger.info(f'Executing "user.update" API method')
+            zapi.do_request(method='user.update', params=users_update_params)
 
     # Logout from Zabbix and LDAP
     logger.debug(f'Logout from Zabbix API')
