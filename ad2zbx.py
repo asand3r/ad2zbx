@@ -10,20 +10,38 @@ from pyzabbix import ZabbixAPI
 from ldap3.core.exceptions import LDAPSocketOpenError, LDAPBindError
 
 
+class PersonMedia:
+    def __init__(self, name, value):
+        self.name = name
+        self.value = value
+
+    def __repr__(self):
+        return f'{self.name}, {self.value}'
+
+    def __str__(self):
+        return f'Media: {self.name}\nValue: {self.value}'
+
+    def __hash__(self):
+        return hash((self.name, self.value))
+
+    def __eq__(self, other):
+        return True if self.__hash__() == other.__hash__() else False
+
+
 class Person:
-    def __init__(self, login, sn, name, privileges=1, media=None):
-        self.login = login
-        self.sn = sn
+    def __init__(self, alias, surname, name, privileges=1, media=None):
+        self.alias = alias
+        self.surname = surname
         self.name = name
         self.privileges = privileges
         self.media = media
 
     def __repr__(self):
-        return self.login
+        return self.alias
 
     def __str__(self):
         zabbix_roles = {1: 'Zabbix User', 2: 'Zabbix Admin', 3: 'Zabbix Super Admin'}
-        person = f"Login: {self.login}\nSurname: {self.sn}\nName: {self.name}\n" \
+        person = f"Login: {self.alias}\nSurname: {self.surname}\nName: {self.name}\n" \
                  f"Privileges: {zabbix_roles[self.privileges]} ({self.privileges})"
         return person
 
@@ -34,7 +52,7 @@ class Person:
         return not self.__eq__(other)
 
     def __hash__(self):
-        return hash((self.login, self.sn, self.name, tuple((m for m in self.media))))
+        return hash((self.alias, self.surname, self.name, tuple((m for m in self.media))))
 
 
 def ldap_connect(ldap_server, bind_user, bind_password):
@@ -58,7 +76,7 @@ def ldap_connect(ldap_server, bind_user, bind_password):
     return conn
 
 
-def get_users(conn, searchfilter, attrs):
+def get_ldap_users(conn, searchfilter, attrs):
     """
     Search users in catalog using searchfilter and return it with given attributes.
     :param conn: ldap3.Connection object.
@@ -90,7 +108,7 @@ def get_dn(conn, object_class, property_value, property_name='sAMAccountName'):
     return dn_list
 
 
-def check_aduser_media(user):
+def check_ldap_user_media(user):
     """
     Check AD user media attributes to have a not-null value.
     :param user: Dict with user's attributes.
@@ -102,10 +120,7 @@ def check_aduser_media(user):
         if user[attr[0]] is None:
             empty_attrs.append(attr)
 
-    if len(empty_attrs) == 0:
-        return True, empty_attrs
-    else:
-        return False, empty_attrs
+    return True, empty_attrs if len(empty_attrs) == 0 else False, empty_attrs
 
 
 def prepare_to_create(user, gid, zm_types):
@@ -409,7 +424,7 @@ if __name__ == '__main__':
             PREP_STEPS[attr] = prep_steps
 
     # Establish connection with AD server
-    logger.debug(f'Connecting to LDAP: {LDAP_SRV} with user {LDAP_USER}')
+    logger.debug(f'Connecting to LDAP server: {LDAP_SRV} with user {LDAP_USER}')
     try:
         ldap_conn = ldap_connect(LDAP_SRV, LDAP_USER, LDAP_PASS)
         logger.debug(f'Connected to {ldap_conn.server.host}:{ldap_conn.server.port}')
@@ -426,7 +441,7 @@ if __name__ == '__main__':
         group_dn = get_dn(ldap_conn, 'Group', group)
         use_nested = ':1.2.840.113556.1.4.1941:' if LDAP_USE_NESTED_GROUPS else ''
         search_filter = f'(&{LDAP_USER_FILTER}(memberOf{use_nested}={group_dn[0]}))'
-        ldap_users = get_users(ldap_conn, search_filter, LDAP_USER_ATTRS)
+        ldap_users = get_ldap_users(ldap_conn, search_filter, LDAP_USER_ATTRS)
         for ldap_user in ldap_users:
             # Dict to store user's attr: value pares
             ad_user_dict = {'type': LDAP_GROUPS[group]}
@@ -434,12 +449,12 @@ if __name__ == '__main__':
                 raw_attr_value = ldap_user[attr].value
                 # Preprocessing
                 if attr in PREP_STEPS.keys() and raw_attr_value is not None:
-                    ad_user_dict[attr] = prep_exec(ldap_user['sAMAccountName'], raw_attr_value, PREP_STEPS[attr])
+                    ad_user_dict[attr] = prep_exec(ldap_user[LDAP_USER_ID_ATTR], raw_attr_value, PREP_STEPS[attr])
                 else:
                     ad_user_dict[attr] = raw_attr_value
-            if ldap_user['sAMAccountName'] not in temp_processed_ldap_users:
+            if ldap_user[LDAP_USER_ID_ATTR] not in temp_processed_ldap_users:
                 ldap_users_result_list.append(ad_user_dict)
-            temp_processed_ldap_users.append(ldap_user['sAMAccountName'])
+            temp_processed_ldap_users.append(ldap_user[LDAP_USER_ID_ATTR])
     logger.debug(f'Received {len(ldap_users_result_list)} users from LDAP')
     # Connect to Zabbix API
     zapi = ZabbixAPI(ZBX_API_URL)
@@ -485,7 +500,7 @@ if __name__ == '__main__':
         if ldap_user_login not in zbx_users_logins:
             logger.debug(f'User {ldap_user_login} not found in Zabbix and must be created.')
             # Check given users attributes for null values
-            check_result = check_aduser_media(ldap_user)
+            check_result = check_ldap_user_media(ldap_user)
             # Create new user if: check return True as 1st element or create_with_empty_media set to True in config
             if MAIN_CREATE_WITH_EMPTY_MEDIA or check_result[0]:
                 logger.info(f'User must be created {ldap_user}')
