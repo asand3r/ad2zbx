@@ -8,6 +8,7 @@ from argparse import ArgumentParser
 from configparser import RawConfigParser, NoOptionError
 
 from pyzabbix import ZabbixAPI
+from pyzabbix import ZabbixAPIException
 from ldap3.core.exceptions import LDAPSocketOpenError, LDAPBindError
 
 
@@ -50,12 +51,12 @@ def ldap_connect(ldap_server, bind_user, bind_password):
     srv = ldap3.Server(ldap_server, get_info='ALL', mode='IP_V4_PREFERRED', use_ssl=LDAP_SSL)
     try:
         conn = ldap3.Connection(srv, auto_bind=True, authentication=ldap3.NTLM, user=bind_user, password=bind_password)
-    except LDAPSocketOpenError as e:
-        logger.critical(f'{e.__str__()}')
-        raise SystemExit(f'ERROR: {e.__str__()}')
-    except ConnectionError as e:
-        logger.critical(f'{e.__str__()}')
-        raise SystemExit(f'ERROR: {e.__str__()}')
+    except LDAPSocketOpenError as conn_soc_err:
+        logger.critical(f'{conn_soc_err.__str__()}')
+        raise SystemExit(f'ERROR: {conn_soc_err.__str__()}')
+    except ConnectionError as conn_err:
+        logger.critical(f'{conn_err.__str__()}')
+        raise SystemExit(f'ERROR: {conn_err.__str__()}')
     return conn
 
 
@@ -119,7 +120,10 @@ def prepare_to_create(user, gid, zm_types):
     """
 
     # Result dict with params for "user.create" method
-    result = {}
+    if zapi_major_version >= 52:
+        result = {'roleid': ZABBIX_ROLES[user['roleid']]}
+    else:
+        result = {}
 
     # Adding static user parameters
     for user_prop, attr in ZBX_USER_ATTR_MAP.items():
@@ -160,8 +164,8 @@ def prepare_to_update(user, zuser, zm_types):
 
     # Check target user type
     logger.debug(f'Zabbix user object: {zuser}')
-    if zuser['type'] != str(user['type']):
-        result['type'] = str(user['type'])
+    logger.debug(f'LDAP User object: {user}')
+    result[ZUSER_TYPE_PROPERTY] = str(user[ZUSER_TYPE_PROPERTY])
 
     # List of Zabbix medias to update
     update_medias = []
@@ -282,12 +286,13 @@ def prep_exec(user, value, steps):
     return value
 
 
-def get_env_or_conf(env_var, conf_section, conf_option):
+def get_cfg_param(env_var, conf_section, conf_option, conf_fallback=None):
     """
     Read environment variable or config parameter as fallback.
     :param env_var: environment variable name
     :param conf_section: fallback config section name
     :param conf_option: fallback config option name
+    :param conf_fallback: Fallback if config missing value
     :return: parameter value
     """
 
@@ -295,7 +300,7 @@ def get_env_or_conf(env_var, conf_section, conf_option):
     if param_value is None:
         logger.debug(f'Env variable {env_var} is not set. Using config file to get {conf_option}')
         try:
-            param_value = config.get(conf_section, conf_option)
+            param_value = config.get(conf_section, conf_option, fallback=conf_fallback)
         except NoOptionError:
             logger.critical(f'Cannot set {conf_option} parameter neither from config file nor env variable. '
                             f'Please set {conf_option} config parameter or {env_var} env variable')
@@ -305,10 +310,12 @@ def get_env_or_conf(env_var, conf_section, conf_option):
 
 if __name__ == '__main__':
 
-    VERSION = '0.1alpha3'
+    VERSION = '0.1alpha4'
+    # Disable SSL warnings
+    urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
     # Parsing CLI arguments
-    main_parser = ArgumentParser(description='Script to import users from LDAP to Zabbix', add_help=True)
+    main_parser = ArgumentParser(description='Script to import users from LDAP server to Zabbix', add_help=True)
     main_parser.add_argument('-d', '--dry-run', action='store_true', help='Do not make any changes')
     main_parser.add_argument('-c', '--config', type=str, default='./ad2zbx.conf', help='Path to configuration file')
     main_parser.add_argument('-v', '--version', action='version', version=VERSION)
@@ -337,8 +344,8 @@ if __name__ == '__main__':
         raise SystemExit(f'Cannot read config file "{args.config}"')
 
     # logging
-    LOG_FILE = config.get('logging', 'log_file', fallback='/tmp/ad2zbx.log')
-    LOG_LEVEL = config.get('logging', 'log_level', fallback='WARNING')
+    LOG_FILE = get_cfg_param('AD2ZBX_LOG_FILE', 'logging', 'log_file', conf_fallback='/tmp/ad2zbx.log')
+    LOG_LEVEL = get_cfg_param('AD2ZBX_LOG_LEVEL', 'logging', 'log_level', conf_fallback='WARNING')
 
     # Set file logger setting
     logger.debug(f'Creating file logger. Writes messages to {LOG_FILE} starting with {LOG_LEVEL} level')
@@ -380,9 +387,9 @@ if __name__ == '__main__':
     MAIN_CREATE_WITH_EMPTY_MEDIA = config.getboolean('main', 'create_with_empty_media',
                                                      fallback=DEF_MAIN_CREATE_WITH_EMPTY_MEDIA)
     # ldap section
-    LDAP_SRV = config.get('ldap', 'ldap_server')
-    LDAP_USER = config.get('ldap', 'ldap_user')
-    LDAP_PASS = get_env_or_conf('AD2ZBX_LDAP_PASS', 'ldap', 'ldap_pass')
+    LDAP_SRV = get_cfg_param('AD2ZBX_LDAP_SERVER', 'ldap', 'ldap_server')
+    LDAP_USER = get_cfg_param('AD2ZBX_LDAP_USER', 'ldap', 'ldap_user')
+    LDAP_PASS = get_cfg_param('AD2ZBX_LDAP_PASS', 'ldap', 'ldap_pass')
     LDAP_SSL = config.getboolean('ldap', 'use_ssl', fallback=False)
     LDAP_GROUPS = eval(config.get('ldap', 'group_names_map'))
     LDAP_MERGE_PRIVILEGES = config.get('ldap', 'merge_privileges', fallback=DEF_LDAP_MERGE_PRIVILEGES)
@@ -394,10 +401,10 @@ if __name__ == '__main__':
     LDAP_USE_NESTED_GROUPS = config.getboolean('ldap', 'use_nested_groups', fallback=DEF_LDAP_USE_NESTED_GROUPS)
 
     # zabbix section
-    ZBX_API_URL = config.get('zabbix', 'zbx_api_url')
-    ZBX_API_VERIFY_SSL = config.get('zabbix', 'verify_ssl', fallback=DEF_ZBX_API_VERIFY_SSL)
-    ZBX_USER = config.get('zabbix', 'zbx_user')
-    ZBX_PASS = get_env_or_conf('AD2ZBX_ZBX_PASS', 'zabbix', 'zbx_pass')
+    ZBX_API_URL = get_cfg_param('AD2ZBX_ZBX_API_URL', 'zabbix', 'zbx_api_url')
+    ZBX_API_VERIFY_SSL = config.getboolean('zabbix', 'verify_ssl', fallback=DEF_ZBX_API_VERIFY_SSL)
+    ZBX_USER = get_cfg_param('AD2ZBX_ZBX_USER', 'zabbix', 'zbx_user')
+    ZBX_PASS = get_cfg_param('AD2ZBX_ZBX_PASS', 'zabbix', 'zbx_pass')
     ZBX_TARGET_GROUP = config.get('zabbix', 'zbx_group_name')
     ZBX_USER_MEDIA_MAP = eval(config.get('zabbix', 'zbx_user_media_map', fallback=DEF_ZBX_USER_MEDIA_MAP))
     ZBX_USER_ATTR_MAP = eval(config.get('zabbix', 'zbx_user_attr_map', fallback=DEF_ZBX_USER_ATTR_MAP))
@@ -412,7 +419,7 @@ if __name__ == '__main__':
                 logger.critical(f'Cannot parse {prep_steps[1]} as dict for step {prep_steps}')
                 raise SyntaxError(f'ERROR: Cannot parse {prep_steps[1]} as dict for step {prep_steps}')
 
-    # Establish connection with AD server
+    # Connect to LDAP server
     logger.debug(f'Connecting to LDAP: {LDAP_SRV} with user {LDAP_USER}')
     try:
         ldap_conn = ldap_connect(LDAP_SRV, LDAP_USER, LDAP_PASS)
@@ -420,6 +427,22 @@ if __name__ == '__main__':
     except LDAPBindError:
         logger.critical(f'Cannot bind to LDAP server {LDAP_SRV} with given user and password')
         raise SystemExit()
+
+    # Connect to Zabbix API
+    logger.debug(f'Connecting to Zabbix API: {ZBX_API_URL} with user {ZBX_USER}')
+    zapi = ZabbixAPI(ZBX_API_URL)
+    logger.debug(f'Zabbix API: Verify SSL certificate: {ZBX_API_VERIFY_SSL}')
+    zapi.session.verify = ZBX_API_VERIFY_SSL
+    try:
+        zapi.login(ZBX_USER, ZBX_PASS)
+        logger.debug(f'Connected to Zabbix API {zapi.api_version()}')
+    except ZabbixAPIException as e:
+        logger.critical(f'Cannot connect to Zabbix API with user {ZBX_USER}: {e.error["data"]}')
+        ldap_conn.unbind()
+        raise SystemExit()
+    # Define params depends on Zabbix API version
+    zapi_major_version = int(''.join(zapi.api_version().split('.')[0:2]))
+    ZUSER_TYPE_PROPERTY = 'type' if zapi_major_version < 52 else 'roleid'
 
     ldap_users_result_list = []
     temp_processed_ldap_users = []
@@ -433,7 +456,7 @@ if __name__ == '__main__':
         ldap_users = get_users(ldap_conn, search_filter, LDAP_USER_ATTRS)
         for ldap_user in ldap_users:
             # Dict to store user's attr: value pares
-            ad_user_dict = {'type': LDAP_GROUPS[group]}
+            ad_user_dict = {ZUSER_TYPE_PROPERTY: LDAP_GROUPS[group]}
             for attr in LDAP_USER_ATTRS:
                 raw_attr_value = ldap_user[attr].value
                 # Preprocessing
@@ -445,11 +468,6 @@ if __name__ == '__main__':
                 ldap_users_result_list.append(ad_user_dict)
             temp_processed_ldap_users.append(ldap_user['sAMAccountName'])
     logger.debug(f'Received {len(ldap_users_result_list)} users from LDAP')
-    # Connect to Zabbix API
-    zapi = ZabbixAPI(ZBX_API_URL)
-    zapi.session.verify = ZBX_API_VERIFY_SSL
-    zapi.login(ZBX_USER, ZBX_PASS)
-    logger.debug(f'Connected to Zabbix API {zapi.api_version()}')
 
     # Get target group ID and check it
     zbx_group = zapi.do_request(method="usergroup.get", params={"filter": {"name": ZBX_TARGET_GROUP}})['result']
@@ -466,10 +484,14 @@ if __name__ == '__main__':
         raise SystemExit(f'ERROR: Cannot find group "{ZBX_TARGET_GROUP}" in Zabbix.')
 
     # Get all Zabbix users with Zabbix API
-    user_get_params = {"selectMedias": "extend", "output": list(ZBX_USER_ATTR_MAP.keys()) + ['type']}
+    user_get_params = {"selectMedias": "extend", "output": list(ZBX_USER_ATTR_MAP.keys()) + [ZUSER_TYPE_PROPERTY]}
     zbx_users = {zu['alias']: zu for zu in zapi.do_request(method="user.get", params=user_get_params)['result']}
     zbx_users_logins = [zbx_user for zbx_user in zbx_users.keys()]
     logger.debug(f'Received {len(zbx_users_logins)} users from Zabbix')
+
+    # Get Zabbix roles if Zabbix version above 5.2
+    if zapi_major_version >= 52:
+        ZABBIX_ROLES = {role['name']: role['roleid'] for role in zapi.role.get()}
 
     # Get list of Zabbix media types (mt) set in configuration file
     # Possible mediatypes: 0 - email; 1 - script; 2 - SMS; 4 - Webhook.
@@ -481,8 +503,8 @@ if __name__ == '__main__':
 
     # Prepare list to store data for ZabbixAPI methods
     logger.debug(f'Start to process LDAP users list')
-    users_create_params = []
-    users_update_params = []
+    users_to_create = []
+    users_to_update = []
     for ldap_user in ldap_users_result_list:
         ldap_user_login = ldap_user[LDAP_USER_ID_ATTR]
         logger.debug(f'Checking user {ldap_user_login}')
@@ -494,7 +516,7 @@ if __name__ == '__main__':
             if MAIN_CREATE_WITH_EMPTY_MEDIA or check_result[0]:
                 logger.info(f'User must be created {ldap_user}')
                 create_params = prepare_to_create(ldap_user, zbx_group_id, zbx_attr_media_map)
-                users_create_params.append(create_params)
+                users_to_create.append(create_params)
             else:
                 logger.info(f'User {ldap_user_login} has empty attributes: {check_result[1]}. Skipping.')
         # Update existing user in Zabbix
@@ -502,29 +524,28 @@ if __name__ == '__main__':
             logger.debug(f'User {ldap_user_login} found in Zabbix. Checking the need for an update')
             zbx_user = zbx_users[ldap_user_login]
             update_params = prepare_to_update(ldap_user, zbx_user, zbx_attr_media_map)
-            # TODO: Rewrite! Very stupid. Related to 244-251 lines in prepare_to_update
             if 'user_medias' in update_params:
                 if len(update_params['user_medias']) != 0:
                     logger.debug(f'User {ldap_user_login} must be updated in Zabbix with params: {update_params}')
-                    users_update_params.append(update_params)
+                    users_to_update.append(update_params)
             else:
                 logger.debug(f'User {ldap_user_login} is up to date')
 
     # Create users in Zabbix
-    logger.info(f'Number of users to create: {len(users_create_params)}')
-    logger.debug(f'List of users to create: {users_create_params}')
+    logger.info(f'Number of users to create: {len(users_to_create)}')
+    logger.debug(f'List of users to create: {users_to_create}')
     if not DRY_RUN:
-        if len(users_create_params) > 0:
+        if len(users_to_create) > 0:
             logger.info(f'Executing "user.create" API method')
-            zapi.do_request(method='user.create', params=users_create_params)
+            zapi.do_request(method='user.create', params=users_to_create)
 
     # Update users in Zabbix
-    logger.info(f'Number of users to update: {len(users_update_params)}')
-    logger.debug(f'List of users to update: {users_update_params}')
+    logger.info(f'Number of users to update: {len(users_to_update)}')
+    logger.debug(f'List of users to update: {users_to_update}')
     if not DRY_RUN:
-        if len(users_update_params) > 0:
+        if len(users_to_update) > 0:
             logger.info(f'Executing "user.update" API method')
-            zapi.do_request(method='user.update', params=users_update_params)
+            zapi.do_request(method='user.update', params=users_to_update)
 
     # Logout from Zabbix and LDAP
     logger.debug(f'Logout from Zabbix API')
