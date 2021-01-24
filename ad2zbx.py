@@ -424,14 +424,12 @@ if __name__ == '__main__':
     logger.debug(f'Received {len(ldap_users_result)} users from LDAP')
 
     # Get target group ID and check it
-    zbx_group = zapi.do_request(method="usergroup.get", params={"filter": {"name": ZBX_TARGET_GROUP}})['result']
+    zbx_group = zapi.usergroup.get(filter={"name": ZBX_TARGET_GROUP})
     logger.debug(f'Received group from Zabbix API {zbx_group}')
     if len(zbx_group) != 0:
-        if zbx_group[0]['gui_access'] == '0':
-            logger.critical(f'Target Zabbix group "{ZBX_TARGET_GROUP}" isn\'t set to use LDAP authentication method.')
-            raise SystemExit()
-        elif zbx_group[0]['gui_access'] in ('1', '3'):
-            logger.warning(f'Target group is using internal authentication method or set to disable gui access.')
+        if zbx_group[0]['gui_access'] != '2':
+            logger.critical(f'Target group "{ZBX_TARGET_GROUP}" must be set to use LDAP authentication method')
+            raise SystemExit(f'Target group "{ZBX_TARGET_GROUP}" must be set to use LDAP authentication method')
         zbx_group_id = zbx_group[0]['usrgrpid']
     else:
         logger.critical(f'Cannot find group "{ZBX_TARGET_GROUP}" in Zabbix.')
