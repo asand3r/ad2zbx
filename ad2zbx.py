@@ -12,20 +12,38 @@ from pyzabbix import ZabbixAPIException
 from ldap3.core.exceptions import LDAPSocketOpenError, LDAPBindError
 
 
+class PersonMedia:
+    def __init__(self, name, value):
+        self.name = name
+        self.value = value
+
+    def __repr__(self):
+        return f'{self.name}, {self.value}'
+
+    def __str__(self):
+        return f'Media: {self.name}\nValue: {self.value}'
+
+    def __hash__(self):
+        return hash((self.name, self.value))
+
+    def __eq__(self, other):
+        return True if self.__hash__() == other.__hash__() else False
+
+
 class Person:
-    def __init__(self, login, sn, name, privileges=1, media=None):
-        self.login = login
-        self.sn = sn
+    def __init__(self, alias, surname, name, privileges=1, media=None):
+        self.alias = alias
+        self.surname = surname
         self.name = name
         self.privileges = privileges
         self.media = media
 
     def __repr__(self):
-        return self.login
+        return self.alias
 
     def __str__(self):
         zabbix_roles = {1: 'Zabbix User', 2: 'Zabbix Admin', 3: 'Zabbix Super Admin'}
-        person = f"Login: {self.login}\nSurname: {self.sn}\nName: {self.name}\n" \
+        person = f"Login: {self.alias}\nSurname: {self.surname}\nName: {self.name}\n" \
                  f"Privileges: {zabbix_roles[self.privileges]} ({self.privileges})"
         return person
 
@@ -36,7 +54,7 @@ class Person:
         return not self.__eq__(other)
 
     def __hash__(self):
-        return hash((self.login, self.sn, self.name, tuple((m for m in self.media))))
+        return hash((self.alias, self.surname, self.name, tuple((m for m in self.media))))
 
 
 def ldap_connect(ldap_server, bind_user, bind_password):
@@ -60,7 +78,7 @@ def ldap_connect(ldap_server, bind_user, bind_password):
     return conn
 
 
-def get_users(conn, searchfilter, attrs):
+def get_ldap_users(conn, searchfilter, attrs):
     """
     Search users in catalog using searchfilter and return it with given attributes.
     :param conn: ldap3.Connection object.
@@ -92,7 +110,7 @@ def get_dn(conn, object_class, property_value, property_name='sAMAccountName'):
     return dn_list
 
 
-def check_aduser_media(user):
+def check_ldap_user_media(user):
     """
     Check AD user media attributes to have a not-null value.
     :param user: Dict with user's attributes.
@@ -104,10 +122,7 @@ def check_aduser_media(user):
         if user[attr[0]] in [None, '']:
             empty_attrs.append(attr)
 
-    if len(empty_attrs) == 0:
-        return True, empty_attrs
-    else:
-        return False, empty_attrs
+    return True, empty_attrs if len(empty_attrs) == 0 else False, empty_attrs
 
 
 def prepare_to_create(user, gid, zm_types):
@@ -242,7 +257,6 @@ def prepare_to_update(user, zuser, zm_types):
     if len(result) != 0:
         result['userid'] = zuser['userid']
         result['user_medias'] = update_medias
-    print(result)
     return result
 
 
@@ -259,7 +273,7 @@ def prep_exec(user, value, steps):
     logger.debug(f'Running preprocessing for "{user}", value "{value}" and steps "{steps}"')
     # Check value is as string
     if not isinstance(value, str):
-        logger.error(f'Preprocessing: User {user}, value {value} must be a string, but it\'s a {type(value)}')
+        logger.error(f'Preprocessing: Value {value} must be a string, but it\'s a {type(value)}')
         raise TypeError(f'ERROR: value must be a string, but it\'s a {type(value)}')
     for func, step_args in steps.items():
         logger.debug(f'In value: "{value}", func: {func}, args: "{step_args}"')
@@ -267,9 +281,8 @@ def prep_exec(user, value, steps):
             if len(step_args) == 2:
                 value = value.replace(step_args[0], step_args[1])
             else:
-                logger.error(f'Preprocessing: User {user}, replace step must contains two arguments'
-                             f'but {len(step_args)} given')
-                raise ValueError(f'ERROR: {user}, replace step must contains two arguments but {len(step_args)} given')
+                logger.error(f'Preprocessing: "replace" step expect two arguments, but {len(step_args)} given')
+                raise ValueError(f'ERROR: "replace" step expect two arguments but {len(step_args)} given')
         elif func == 'remove_spaces':
             value = value.replace(" ", "")
         elif func == 'add_suffix':
@@ -454,11 +467,10 @@ if __name__ == '__main__':
         group_dn = get_dn(ldap_conn, 'Group', group)
         use_nested = ':1.2.840.113556.1.4.1941:' if LDAP_USE_NESTED_GROUPS else ''
         search_filter = f'(&{LDAP_USER_FILTER}(memberOf{use_nested}={group_dn[0]}))'
-        ldap_users = get_users(ldap_conn, search_filter, LDAP_USER_ATTRS)
+        ldap_users = get_ldap_users(ldap_conn, search_filter, LDAP_USER_ATTRS)
         for ldap_user in ldap_users:
             # Dict to store user's attr: value pares
             ldap_user_result = {ZUSER_TYPE_PROPERTY: LDAP_GROUPS[group]}
-            print(ldap_user_result)
             for attr in LDAP_USER_ATTRS:
                 raw_attr_value = ldap_user[attr].value
                 # Preprocessing
@@ -513,7 +525,7 @@ if __name__ == '__main__':
         if ldap_user_login not in zbx_users_logins:
             logger.debug(f'User {ldap_user_login} not found in Zabbix and must be created.')
             # Check given users attributes for null values
-            check_result = check_aduser_media(ldap_user)
+            check_result = check_ldap_user_media(ldap_user)
             # Create new user if: check return True as 1st element or create_with_empty_media set to True in config
             if MAIN_CREATE_WITH_EMPTY_MEDIA or check_result[0]:
                 logger.info(f'User must be created {ldap_user}')
@@ -539,7 +551,6 @@ if __name__ == '__main__':
     if not DRY_RUN:
         if len(users_to_create) > 0:
             logger.info(f'Executing "user.create" API method')
-            print(users_to_create)
             zapi.do_request(method='user.create', params=users_to_create)
 
     # Update users in Zabbix
