@@ -269,7 +269,7 @@ def prep_exec(user, value, steps):
     logger.debug(f'Running preprocessing for "{user}", value "{value}" and steps "{steps}"')
     # Check value is as string
     if not isinstance(value, str):
-        logger.error(f'Preprocessing: User {user}, value {value} must be a string, but it\'s a {type(value)}')
+        logger.error(f'Preprocessing: Value {value} must be a string, but it\'s a {type(value)}')
         raise TypeError(f'ERROR: value must be a string, but it\'s a {type(value)}')
     for func, step_args in steps.items():
         logger.debug(f'In value: "{value}", func: {func}, args: "{step_args}"')
@@ -277,9 +277,8 @@ def prep_exec(user, value, steps):
             if len(step_args) == 2:
                 value = value.replace(step_args[0], step_args[1])
             else:
-                logger.error(f'Preprocessing: User {user}, replace step must contains two arguments'
-                             f'but {len(step_args)} given')
-                raise ValueError(f'ERROR: {user}, replace step must contains two arguments but {len(step_args)} given')
+                logger.error(f'Preprocessing: "replace" step expect two arguments, but {len(step_args)} given')
+                raise ValueError(f'ERROR: "replace" step expect two arguments but {len(step_args)} given')
         elif func == 'remove_spaces':
             value = value.replace(" ", "")
         elif func == 'add_suffix':
