@@ -3,6 +3,7 @@
 import os
 import ldap3
 import logging
+import urllib3
 from argparse import ArgumentParser
 from configparser import RawConfigParser, NoOptionError
 
@@ -117,7 +118,7 @@ def check_ldap_user_media(user):
 
     empty_attrs = []
     for attr in ZBX_USER_MEDIA_MAP.values():
-        if user[attr[0]] is None:
+        if user[attr[0]] in [None, '']:
             empty_attrs.append(attr)
 
     return True, empty_attrs if len(empty_attrs) == 0 else False, empty_attrs
@@ -137,7 +138,7 @@ def prepare_to_create(user, gid, zm_types):
 
     # Adding static user parameters
     for user_prop, attr in ZBX_USER_ATTR_MAP.items():
-        result[user_prop] = user[attr]
+        result[user_prop] = '' if user_prop in ['name', 'surname'] and user[attr] is None else user[attr]
     result["usrgrps"] = [{"usrgrpid": gid}]
 
     # Forming user medias list
@@ -173,6 +174,7 @@ def prepare_to_update(user, zuser, zm_types):
             result[zm] = user[ad_attr]
 
     # Check target user type
+    logger.debug(f'Zabbix user object: {zuser}')
     if zuser['type'] != str(user['type']):
         result['type'] = str(user['type'])
 
@@ -330,7 +332,10 @@ if __name__ == '__main__':
 
     # Set console logger
     logger = logging.getLogger('ad2zbx')
-    logger.setLevel(args.console_log_level.upper())
+    try:
+        logger.setLevel(args.console_log_level.upper())
+    except ValueError:
+        raise ValueError(f'Log level must be in "INFO", "WARNING", "ERROR", "CRITICAL", "DEBUG"')
     console_formatter = logging.Formatter('%(asctime)s: %(levelname)s: %(message)s')
     console_handler = logging.StreamHandler()
     console_handler.setLevel(args.console_log_level.upper())
@@ -417,11 +422,10 @@ if __name__ == '__main__':
     if config.has_section('preprocessing') and config.items('preprocessing'):
         for attr, prep_steps in config.items('preprocessing'):
             try:
-                prep_steps = eval(prep_steps)
+                PREP_STEPS[attr] = eval(prep_steps)
             except SyntaxError:
                 logger.critical(f'Cannot parse {prep_steps[1]} as dict for step {prep_steps}')
                 raise SyntaxError(f'ERROR: Cannot parse {prep_steps[1]} as dict for step {prep_steps}')
-            PREP_STEPS[attr] = prep_steps
 
     # Establish connection with AD server
     logger.debug(f'Connecting to LDAP server: {LDAP_SRV} with user {LDAP_USER}')
@@ -434,8 +438,8 @@ if __name__ == '__main__':
 
     ldap_users_result_list = []
     temp_processed_ldap_users = []
-    merge_reverse = True if LDAP_MERGE_PRIVILEGES == 'higher' else False
     # Sort LDAP groups by privileges level
+    merge_reverse = True if LDAP_MERGE_PRIVILEGES == 'higher' else False
     ldap_groups = {k: v for k, v in sorted(LDAP_GROUPS.items(), key=lambda x: x[1], reverse=merge_reverse)}
     for group in ldap_groups.keys():
         group_dn = get_dn(ldap_conn, 'Group', group)
