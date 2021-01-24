@@ -120,10 +120,10 @@ def prepare_to_create(user, gid, zm_types):
     """
 
     # Result dict with params for "user.create" method
-    if zapi_major_version >= 52:
-        result = {'roleid': ZABBIX_ROLES[user['roleid']]}
-    else:
-        result = {}
+    # if ZAPI_VERSION >= 52:
+    #     result = {'roleid': ZABZAPI_VERSIONBIX_ROLES[user['roleid']]}
+    # else:
+    result = {}
 
     # Adding static user parameters
     for user_prop, attr in ZBX_USER_ATTR_MAP.items():
@@ -242,6 +242,7 @@ def prepare_to_update(user, zuser, zm_types):
     if len(result) != 0:
         result['userid'] = zuser['userid']
         result['user_medias'] = update_medias
+    print(result)
     return result
 
 
@@ -441,10 +442,10 @@ if __name__ == '__main__':
         ldap_conn.unbind()
         raise SystemExit()
     # Define params depends on Zabbix API version
-    zapi_major_version = int(''.join(zapi.api_version().split('.')[0:2]))
-    ZUSER_TYPE_PROPERTY = 'type' if zapi_major_version < 52 else 'roleid'
+    ZAPI_VERSION = int(''.join(zapi.api_version().split('.')[0:2]))
+    ZUSER_TYPE_PROPERTY = 'type' if ZAPI_VERSION < 54 else 'roleid'
 
-    ldap_users_result_list = []
+    ldap_users_result = []
     temp_processed_ldap_users = []
     # Sort LDAP groups by privileges level
     merge_reverse = True if LDAP_MERGE_PRIVILEGES == 'higher' else False
@@ -456,26 +457,27 @@ if __name__ == '__main__':
         ldap_users = get_users(ldap_conn, search_filter, LDAP_USER_ATTRS)
         for ldap_user in ldap_users:
             # Dict to store user's attr: value pares
-            ad_user_dict = {ZUSER_TYPE_PROPERTY: LDAP_GROUPS[group]}
+            ldap_user_result = {ZUSER_TYPE_PROPERTY: LDAP_GROUPS[group]}
+            print(ldap_user_result)
             for attr in LDAP_USER_ATTRS:
                 raw_attr_value = ldap_user[attr].value
                 # Preprocessing
                 if attr in PREP_STEPS.keys() and raw_attr_value is not None:
-                    ad_user_dict[attr] = prep_exec(ldap_user['sAMAccountName'], raw_attr_value, PREP_STEPS[attr])
+                    ldap_user_result[attr] = prep_exec(ldap_user['sAMAccountName'], raw_attr_value, PREP_STEPS[attr])
                 else:
-                    ad_user_dict[attr] = raw_attr_value
+                    ldap_user_result[attr] = raw_attr_value
             if ldap_user['sAMAccountName'] not in temp_processed_ldap_users:
-                ldap_users_result_list.append(ad_user_dict)
+                ldap_users_result.append(ldap_user_result)
             temp_processed_ldap_users.append(ldap_user['sAMAccountName'])
-    logger.debug(f'Received {len(ldap_users_result_list)} users from LDAP')
+    logger.debug(f'Received {len(ldap_users_result)} users from LDAP')
 
     # Get target group ID and check it
     zbx_group = zapi.do_request(method="usergroup.get", params={"filter": {"name": ZBX_TARGET_GROUP}})['result']
     logger.debug(f'Received group from Zabbix API {zbx_group}')
     if len(zbx_group) != 0:
         if zbx_group[0]['gui_access'] == '0':
-            logger.warning(f'Target Zabbix group "{ZBX_TARGET_GROUP}" isn\'t set to use LDAP authentication method.'
-                           f' It\'s OK if default method is.')
+            logger.critical(f'Target Zabbix group "{ZBX_TARGET_GROUP}" isn\'t set to use LDAP authentication method.')
+            raise SystemExit()
         elif zbx_group[0]['gui_access'] in ('1', '3'):
             logger.warning(f'Target group is using internal authentication method or set to disable gui access.')
         zbx_group_id = zbx_group[0]['usrgrpid']
@@ -490,7 +492,7 @@ if __name__ == '__main__':
     logger.debug(f'Received {len(zbx_users_logins)} users from Zabbix')
 
     # Get Zabbix roles if Zabbix version above 5.2
-    if zapi_major_version >= 52:
+    if ZAPI_VERSION >= 52:
         ZABBIX_ROLES = {role['name']: role['roleid'] for role in zapi.role.get()}
 
     # Get list of Zabbix media types (mt) set in configuration file
@@ -505,7 +507,7 @@ if __name__ == '__main__':
     logger.debug(f'Start to process LDAP users list')
     users_to_create = []
     users_to_update = []
-    for ldap_user in ldap_users_result_list:
+    for ldap_user in ldap_users_result:
         ldap_user_login = ldap_user[LDAP_USER_ID_ATTR]
         logger.debug(f'Checking user {ldap_user_login}')
         if ldap_user_login not in zbx_users_logins:
@@ -537,6 +539,7 @@ if __name__ == '__main__':
     if not DRY_RUN:
         if len(users_to_create) > 0:
             logger.info(f'Executing "user.create" API method')
+            print(users_to_create)
             zapi.do_request(method='user.create', params=users_to_create)
 
     # Update users in Zabbix
